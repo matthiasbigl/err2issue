@@ -15,7 +15,7 @@ from err2issue import fingerprint as fp
 from err2issue.github.auth import StaticTokenProvider
 from err2issue.github.client import GitHubClient
 from err2issue.github.filer import IssueFiler
-from tests.conftest import issue_payload, make_event, make_log_line, no_sleep
+from tests.conftest import FakeClock, issue_payload, make_event, make_log_line, no_sleep
 
 API = "https://api.github.com"
 REPO = "acme/api"
@@ -69,7 +69,7 @@ async def test_created_issue_body_carries_the_machine_header():
 
     assert parse_header(body_of(create)["body"]) == {
         "fingerprint": FINGERPRINT,
-        "version": "v1",
+        "version": "v2",
         "count": 1,
     }
 
@@ -312,6 +312,88 @@ async def test_repository_with_issues_disabled_is_skipped_and_remembered():
     assert listing.call_count == 1, "an unavailable repo must not be probed again"
 
 
+@respx.mock
+async def test_unavailable_repository_is_probed_again_after_the_cooldown():
+    """ "Issues disabled" is a setting somebody can turn back on.
+
+    Without an expiry, a migration that toggles it for an hour costs every
+    error for the lifetime of the pod, which keeps reporting Ready throughout.
+    """
+    clock = FakeClock()
+    listing = respx.get(f"{API}/repos/{REPO}/issues").mock(return_value=httpx.Response(410))
+    async with httpx.AsyncClient() as http:
+        filer = build_filer(http, unavailable_cooldown_seconds=900, clock=clock)
+        assert (await filer.file(make_event(), FINGERPRINT, REPO, "s")).action == "skipped"
+
+        clock.now += 899
+        assert (await filer.file(make_event(), FINGERPRINT, REPO, "s")).action == "skipped"
+        assert listing.call_count == 1, "still cooling down"
+
+        clock.now += 2
+        assert (await filer.file(make_event(), FINGERPRINT, REPO, "s")).action == "skipped"
+        assert listing.call_count == 2, "cooldown lapsed, so the repo is probed again"
+
+
+@respx.mock
+async def test_a_repository_that_comes_back_files_again():
+    """The whole point of the expiry: recovery without a restart."""
+    clock = FakeClock()
+    listing = respx.get(f"{API}/repos/{REPO}/issues").mock(
+        side_effect=[httpx.Response(410), httpx.Response(200, json=[])]
+    )
+    respx.post(f"{API}/repos/{REPO}/labels").mock(return_value=httpx.Response(201, json={}))
+    respx.post(f"{API}/repos/{REPO}/issues").mock(
+        return_value=httpx.Response(201, json=issue_payload())
+    )
+    async with httpx.AsyncClient() as http:
+        filer = build_filer(http, unavailable_cooldown_seconds=60, clock=clock)
+        assert (await filer.file(make_event(), FINGERPRINT, REPO, "s")).action == "skipped"
+        assert filer.health()["unavailable_repos"] == {REPO: 60.0}
+
+        clock.now += 61
+        assert (await filer.file(make_event(), FINGERPRINT, REPO, "s")).action == "created"
+
+    assert listing.call_count == 2
+    assert filer.health()["unavailable_repos"] == {}, "recovery must clear the mark"
+    assert filer.health()["unavailable_events"] == 1
+
+
+@respx.mock
+async def test_a_still_broken_repository_re_arms_rather_than_resetting():
+    """A lapsed cooldown that finds the repo still gone must not fall through
+    to probing on every subsequent error."""
+    clock = FakeClock()
+    listing = respx.get(f"{API}/repos/{REPO}/issues").mock(return_value=httpx.Response(410))
+    async with httpx.AsyncClient() as http:
+        filer = build_filer(http, unavailable_cooldown_seconds=60, clock=clock)
+        await filer.file(make_event(), FINGERPRINT, REPO, "s")
+        clock.now += 61
+        await filer.file(make_event(), FINGERPRINT, REPO, "s")
+        for _ in range(5):
+            clock.now += 10
+            await filer.file(make_event(), FINGERPRINT, REPO, "s")
+
+    assert listing.call_count == 2, "the second failure must re-arm the cooldown"
+    assert filer.health()["unavailable_events"] == 2
+
+
+@respx.mock
+async def test_one_unavailable_repository_does_not_block_another():
+    other = "acme/worker"
+    respx.get(f"{API}/repos/{REPO}/issues").mock(return_value=httpx.Response(410))
+    respx.get(f"{API}/repos/{other}/issues").mock(return_value=httpx.Response(200, json=[]))
+    respx.post(f"{API}/repos/{other}/labels").mock(return_value=httpx.Response(201, json={}))
+    respx.post(f"{API}/repos/{other}/issues").mock(
+        return_value=httpx.Response(201, json=issue_payload())
+    )
+    async with httpx.AsyncClient() as http:
+        filer = build_filer(http)
+        assert (await filer.file(make_event(), FINGERPRINT, REPO, "s")).action == "skipped"
+        assert (await filer.file(make_event(), FINGERPRINT, other, "s")).action == "created"
+
+    assert list(filer.health()["unavailable_repos"]) == [REPO]
+
+
 # -- lookup shape ----------------------------------------------------------
 
 
@@ -328,5 +410,5 @@ async def test_lookup_uses_the_versioned_fingerprint_label():
         await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
 
     params = listing.calls[0].request.url.params
-    assert params["labels"] == f"err2issue-fp-v1-{FINGERPRINT}"
+    assert params["labels"] == f"err2issue-fp-v2-{FINGERPRINT}"
     assert params["state"] == "all"

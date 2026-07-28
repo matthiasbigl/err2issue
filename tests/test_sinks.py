@@ -10,7 +10,8 @@ import respx
 
 from err2issue.config import Settings
 from err2issue.github.auth import StaticTokenProvider
-from err2issue.github.client import GitHubClient
+from err2issue.github.client import GitHubClient, RepoUnavailable
+from err2issue.github.filer import IssueFiler
 from err2issue.sinks import (
     WORKFLOW_INPUT_MAX_CHARS,
     DryRunSink,
@@ -18,7 +19,7 @@ from err2issue.sinks import (
     WorkflowDispatchSink,
     build_sink,
 )
-from tests.conftest import issue_payload, make_event, no_sleep
+from tests.conftest import FakeClock, issue_payload, make_event, no_sleep
 
 API = "https://api.github.com"
 REPO = "acme/api"
@@ -38,7 +39,7 @@ async def test_dry_run_records_the_action_without_writing():
     assert result.action == "dry-run"
     assert sink.calls[0]["repo"] == REPO
     assert sink.calls[0]["title"] == "[x1] A title"
-    assert sink.calls[0]["label"] == "err2issue-fp-v1-abc123def456"
+    assert sink.calls[0]["label"] == "err2issue-fp-v2-abc123def456"
 
 
 async def test_dry_run_emits_through_the_supplied_callback():
@@ -62,7 +63,7 @@ async def test_workflow_sink_dispatches_with_the_documented_inputs():
     assert body["ref"] == "main"
     inputs = body["inputs"]
     assert inputs["fingerprint"] == "abc123def456"
-    assert inputs["fingerprint_version"] == "v1"
+    assert inputs["fingerprint_version"] == "v2"
     assert inputs["service"] == "checkout-api"
     assert inputs["exception_type"] == "TypeError"
     assert inputs["title"] == "[x1] A title"
@@ -151,3 +152,14 @@ def test_build_sink_refuses_a_credentialless_github_sink():
 def test_extra_labels_are_parsed_from_settings():
     settings = Settings(issue_labels="err2issue, production , triage")
     assert settings.extra_labels == ["err2issue", "production", "triage"]
+
+
+async def test_github_sink_reports_filer_availability_state():
+    """/metrics and /stats read repository availability through the sink."""
+    async with httpx.AsyncClient() as http:
+        filer = IssueFiler(build_client(http), unavailable_cooldown_seconds=60, clock=FakeClock())
+        sink = GitHubSink(filer)
+        assert sink.health() == {"unavailable_repos": {}, "unavailable_events": 0}
+
+        filer._mark_unavailable(REPO, RepoUnavailable("issues disabled"))
+        assert sink.health() == {"unavailable_repos": {REPO: 60.0}, "unavailable_events": 1}

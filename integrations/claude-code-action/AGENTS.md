@@ -121,8 +121,10 @@ unproven, and the human should know the difference.
   repository, stop, tell the human, and recommend rotating it.
 - **Never widen `permissions:`.** Triage is deliberately `contents: read`. An
   agent that can only comment cannot damage the repository.
-- **Never remove an `err2issue-fp-v1-*` label** from any issue. It is the
-  deduplication key; removing it causes duplicate issues.
+- **Never remove an `err2issue-fp-*` label** from any issue, whatever version
+  it carries. It is the deduplication key; removing it causes duplicate issues.
+  Issues predating a fingerprint version bump keep the older label and are
+  addressable only through it.
 - **Do not invent configuration keys.** The valid `env:` names are exactly those
   in the shipped file. `claude-code-action@v1` inputs are `prompt`,
   `claude_args`, `anthropic_api_key`, `github_token`, `trigger_phrase`,

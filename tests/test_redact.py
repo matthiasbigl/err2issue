@@ -68,6 +68,31 @@ def test_connection_string_keeps_shape_but_masks_password():
     assert "appuser" in out
 
 
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "postgresql://postgres:postgres@pg-rw:5432/grid_app",
+        "redis://default:default@dragonfly:6379",
+        "amqp://admin:admin@rabbit:5672/%2f",
+        "mongodb://root:root@mongo:27017/?authSource=admin",
+    ],
+)
+def test_connection_string_password_is_masked_even_when_it_equals_the_username(dsn):
+    """The default-credential shapes: `postgres:postgres`, `default:default`.
+
+    Replacing the password by *text* masks the first occurrence in the match,
+    which is the username when the two are equal — the password then ships in
+    cleartext into a permanent, watcher-emailed issue. The substitution has to
+    be positional.
+    """
+    user, _, rest = dsn.partition("://")[2].partition(":")
+    password = rest.split("@")[0]
+    out = Redactor()(dsn)
+    assert out.endswith(dsn.split("@", 1)[1]), "host and path must survive"
+    assert f":{password}@" not in out, f"password leaked: {out}"
+    assert f"://{user}:{MASK}@" in out
+
+
 def test_private_key_block_is_collapsed():
     text = (
         "startup failed\n-----BEGIN RSA PRIVATE KEY-----\n"

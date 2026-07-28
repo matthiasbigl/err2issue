@@ -71,7 +71,7 @@ else.
 err2issue writes a fixed format, so you can rely on this structure:
 
 - A machine-readable header with the stable fingerprint:
-  `<!-- err2issue: fingerprint=<hash> version=v1 count=<N> -->`
+  `<!-- err2issue: fingerprint=<hash> version=<vN> count=<N> -->`
 - A table with the service name, version, severity, and trace id.
 - `### Exception` — the exception type and message.
 - `### Stack trace` — the frames, **top frame first**. That is where the error
@@ -167,5 +167,5 @@ responsible and why, and the specific missing piece that would let you finish (a
 fuller stack trace, a sample input, a reproduction step). A precise request for
 what you need is a good outcome for this run.
 
-**Never remove the `err2issue-fp-v1-...` label.** It is the deduplication key.
+**Never remove an `err2issue-fp-*` label**, of any version. It is the deduplication key.
 Deleting it makes err2issue file a duplicate the next time this error occurs.

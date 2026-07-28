@@ -22,10 +22,15 @@ from tests.conftest import JAVA_TRACE, NODE_TRACE, PY_TRACE, make_event
 
 
 def test_line_numbers_do_not_change_identity():
-    """Adding a line above the fault must not re-file the bug."""
+    """Adding a line above the fault must not re-file the bug.
+
+    Both the caller's line and the selected frame's own line are checked: only
+    the second exercises the normalization, since only that frame is hashed.
+    """
     before = make_event(stacktrace=PY_TRACE)
-    after = make_event(stacktrace=PY_TRACE.replace("line 142", "line 157"))
-    assert fp.compute(before) == fp.compute(after)
+    for shifted in ("line 142", "line 88"):
+        after = make_event(stacktrace=PY_TRACE.replace(shifted, "line 157"))
+        assert fp.compute(before) == fp.compute(after), shifted
 
 
 def test_build_path_prefix_does_not_change_identity():
@@ -105,7 +110,9 @@ def test_same_filename_in_different_directories_is_distinct():
 @pytest.mark.parametrize(
     ("trace", "expected_fragment"),
     [
-        (PY_TRACE, "handlers.py"),
+        # Python prints outermost-first, so the innermost frame — the error
+        # site — is the last one. See test_python_frame_selection below.
+        (PY_TRACE, "cart.py"),
         (JAVA_TRACE, "ProfileService.java"),
         (NODE_TRACE, "user.js"),
         ("/app/x.rb:12:in `handler'\n/app/y.rb:3:in `<main>'", "x.rb"),
@@ -139,6 +146,96 @@ def test_top_frame_of_empty_stack_is_none():
     assert fp.top_frame(None) is None
     assert fp.top_frame("") is None
     assert fp.top_frame("   \n\n  ") is None
+
+
+# --------------------------------------------------------------------------
+# PYTHON FRAME SELECTION — the v2 rule
+#
+# Every other ecosystem prints innermost-first; Python prints outermost-first.
+# Taking the first frame in both cases means a Python service is fingerprinted
+# by its entry point, and for a web service almost every error surfaces through
+# one of a handful of handlers.
+# --------------------------------------------------------------------------
+
+_PY_SHARED_HANDLER = """Traceback (most recent call last):
+  File "/srv/app/api/handlers.py", line 42, in handle
+    return dispatch(request)
+  File "/srv/app/{module}", line {line}, in {func}
+    return {expr}
+ZeroDivisionError: division by zero
+"""
+
+
+def _py_trace(module: str, line: int, func: str, expr: str) -> str:
+    return _PY_SHARED_HANDLER.format(module=module, line=line, func=func, expr=expr)
+
+
+def test_two_bugs_behind_one_handler_are_distinct():
+    """The v1 bug: both collapsed onto the handler frame and became one issue,
+    so the second bug was invisible except as a bumped occurrence count."""
+    a = make_event(
+        exception_type="ZeroDivisionError",
+        stacktrace=_py_trace("billing/invoice.py", 88, "total", "amount / count"),
+    )
+    b = make_event(
+        exception_type="ZeroDivisionError",
+        stacktrace=_py_trace("reports/aggregate.py", 315, "mean", "total / n"),
+    )
+    assert fp.top_frame(a.stacktrace) != fp.top_frame(b.stacktrace)
+    assert fp.compute(a) != fp.compute(b)
+
+
+def test_one_bug_reached_by_two_call_paths_is_one_issue():
+    """The other half of the rule: only the error site decides identity, so the
+    same fault reached from two entry points does not split into two issues."""
+    trace = _py_trace("billing/invoice.py", 88, "total", "amount / count")
+    a = make_event(exception_type="ZeroDivisionError", stacktrace=trace)
+    b = make_event(
+        exception_type="ZeroDivisionError",
+        stacktrace=trace.replace("api/handlers.py", "workers/nightly.py").replace(
+            "in handle", "in run_batch"
+        ),
+    )
+    assert fp.compute(a) == fp.compute(b)
+
+
+def test_python_source_excerpts_are_never_selected_as_a_frame():
+    """A traceback interleaves source lines with frames, and a bare call like
+    `total()` matches the Go/C++ symbol marker. Only `File "` lines are eligible."""
+    trace = (
+        'Traceback (most recent call last):\n  File "/srv/app/x.py", line 3, in f\n    total()\n'
+    )
+    assert fp.top_frame(trace).startswith('File "')
+
+
+def test_chained_python_exception_fingerprints_the_final_traceback():
+    """`raise ... from` prints the original traceback first. The reported
+    exception type belongs to the last one, so the site must too."""
+    trace = (
+        "Traceback (most recent call last):\n"
+        '  File "/srv/app/db/pool.py", line 10, in acquire\n'
+        "    raise KeyError(name)\n"
+        "KeyError: 'primary'\n"
+        "\n"
+        "During handling of the above exception, another exception occurred:\n"
+        "\n"
+        "Traceback (most recent call last):\n"
+        '  File "/srv/app/api/handlers.py", line 42, in handle\n'
+        "    return dispatch(request)\n"
+        '  File "/srv/app/db/session.py", line 77, in open\n'
+        "    raise ConnectionError(name) from exc\n"
+        "ConnectionError: primary\n"
+    )
+    assert "session.py" in fp.top_frame(trace)
+
+
+def test_non_python_ecosystems_still_take_the_first_frame():
+    """They print innermost-first, so the first frame is already the error site.
+    Reversing them would fingerprint the entry point instead."""
+    assert "ProfileService.java" in fp.top_frame(JAVA_TRACE)
+    assert "ProfileController" not in fp.top_frame(JAVA_TRACE)
+    assert "user.js" in fp.top_frame(NODE_TRACE)
+    assert "index.js" not in fp.top_frame(NODE_TRACE)
 
 
 # --------------------------------------------------------------------------
@@ -218,12 +315,17 @@ def test_digest_is_lowercase_hex_of_expected_length():
 
 
 # --------------------------------------------------------------------------
-# GOLDEN VECTOR — locks v1 against accidental drift
+# GOLDEN VECTORS — lock the current rules against accidental drift
+#
+# There is no v1 vector because there is no v1 code path: only the *current*
+# version is ever computed. The version lives in the label so issues filed
+# under v1 stay addressable, not so v1 digests stay reproducible — see the
+# Versioning section of docs/FINGERPRINT.md.
 # --------------------------------------------------------------------------
 
 
-def test_v1_golden_vector():
-    """If this fails, the v1 rules changed. Ship v2 rather than editing this."""
+def test_v2_golden_vector():
+    """If this fails, the v2 rules changed. Ship v3 rather than editing this."""
     event = make_event(
         service_name="checkout-api",
         exception_type="TypeError",
@@ -233,3 +335,11 @@ def test_v1_golden_vector():
     assert parts[0] == "checkout-api"
     assert parts[1] == "TypeError"
     assert parts[2] == 'frame:File "src/cart.py", line L, in total'
+
+
+def test_v2_golden_vector_for_a_multi_frame_python_traceback():
+    """The vector that distinguishes v2 from v1: v1 selected `app/handlers.py`."""
+    event = make_event(service_name="checkout-api", exception_type="TypeError")
+    parts = fp.fingerprint_parts(event)
+    assert parts[2] == 'frame:File "app/cart.py", line L, in total'
+    assert fp.label_for(fp.compute(event)) == "err2issue-fp-v2-ed728f7c2949"

@@ -131,8 +131,10 @@ claim it works.
 - **Never hand-edit `.lock.yml`.** It is generated.
 - **Never widen `safe-outputs:` without asking.** It is the entire safety model:
   what is not declared cannot happen.
-- **Never remove an `err2issue-fp-v1-*` label** from an issue. It is the
-  deduplication key; removing it causes duplicate issues.
+- **Never remove an `err2issue-fp-*` label** from an issue, whatever version it
+  carries. It is the deduplication key; removing it causes duplicate issues.
+  Issues predating a fingerprint version bump keep the older label and are
+  addressable only through it.
 - **Do not invent frontmatter keys.** Valid top-level keys are `on`,
   `permissions`, `engine`, `tools`, `network`, `safe-outputs`, `timeout-minutes`,
   `runs-on`, `run-name`. Check

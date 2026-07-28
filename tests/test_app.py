@@ -202,6 +202,12 @@ def test_stats_exposes_routing_and_suppression_state(client):
     assert "suppression" in payload
 
 
+def test_stats_exposes_sink_health(client):
+    """A repository dropping every error routed to it is otherwise invisible:
+    /readyz stays green and the log line is hours old."""
+    assert client.get("/stats").json()["sink_health"] == {}, "dry-run has no repo state"
+
+
 # -- fail fast -------------------------------------------------------------
 
 
@@ -365,3 +371,52 @@ def test_decompression_bomb_is_refused():
     bomb = gzip.compress(b"\0" * (_MAX_DECOMPRESSED_BYTES + 1))
     with pytest.raises(ValueError, match="exceeds"):
         _decompress(bomb, "gzip")
+
+
+# -- request body ceiling --------------------------------------------------
+#
+# The compressed path was bounded and the uncompressed one was not, so the
+# easier payload to send was the unbounded one — capped only by the container's
+# memory limit.
+
+
+@pytest.fixture
+def small_ceiling(monkeypatch):
+    """Shrink the ceiling so the tests do not have to move 64 MiB."""
+    monkeypatch.setattr("err2issue.app._MAX_DECOMPRESSED_BYTES", 4096)
+    return 4096
+
+
+def test_oversized_uncompressed_body_is_refused(client, small_ceiling):
+    response = client.post(
+        "/v1/logs",
+        content=b"x" * (small_ceiling + 1),
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 413
+    assert response.json()["error"].startswith("body of ")
+
+
+def test_a_body_at_the_ceiling_is_still_accepted(client, small_ceiling):
+    """The cap must not clip a legitimate export that happens to be large."""
+    payload = json.dumps(otlp_json()).encode()
+    assert len(payload) <= small_ceiling
+    response = client.post(
+        "/v1/logs", content=payload, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 200
+
+
+def test_oversized_body_is_refused_without_content_length(client, small_ceiling):
+    """A chunked request declares no length, so the cap has to hold while
+    streaming rather than trusting the header."""
+
+    def chunks():
+        for _ in range(4):
+            yield b"x" * 2048
+
+    response = client.post(
+        "/v1/logs", content=chunks(), headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 413
+    assert response.json()["error"].startswith("body exceeds "), "must be the streaming guard"

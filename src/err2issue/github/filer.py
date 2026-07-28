@@ -39,6 +39,7 @@ log = logging.getLogger(__name__)
 LABEL_COLOR = "B60205"
 CLAIM_RETRIES = 3
 CLAIM_BACKOFF_SECONDS = 0.4
+UNAVAILABLE_COOLDOWN_SECONDS = 900.0
 
 
 class _CommentBudget:
@@ -83,6 +84,8 @@ class IssueFiler:
         max_stacktrace_chars: int = 6000,
         max_log_lines: int = 20,
         sleep=asyncio.sleep,
+        unavailable_cooldown_seconds: float = UNAVAILABLE_COOLDOWN_SECONDS,
+        clock=time.monotonic,
     ):
         self.client = client
         self.extra_labels = extra_labels or ["err2issue"]
@@ -92,7 +95,11 @@ class IssueFiler:
         self.max_log_lines = max_log_lines
         self._budget = _CommentBudget(max_comments_per_issue_per_hour)
         self._sleep = sleep
-        self._unavailable: set[str] = set()
+        self.unavailable_cooldown_seconds = unavailable_cooldown_seconds
+        self._clock = clock
+        # repo -> monotonic deadline after which we probe it again.
+        self._unavailable: dict[str, float] = {}
+        self.unavailable_events = 0
 
     async def file(
         self,
@@ -102,51 +109,114 @@ class IssueFiler:
         summary: str,
         correlated: list[LogLine] | None = None,
     ) -> FiledIssue:
-        if repo in self._unavailable:
+        cooling = self._cooling_down(repo)
+        if cooling is not None:
             return FiledIssue(
                 action="skipped",
                 fingerprint=fingerprint,
                 repo=repo,
-                detail="repository previously marked unavailable",
+                detail=f"repository marked unavailable; retrying in {cooling:.0f}s",
             )
 
-        label = fp.label_for(fingerprint)
         try:
-            existing = await self.client.list_issues_by_label(repo, label, state="all")
-            if existing:
-                return await self._record_occurrence(
-                    self._pick(existing), event, fingerprint, repo, correlated
-                )
-
-            claimed = await self.client.create_label(
-                repo,
-                label,
-                color=LABEL_COLOR,
-                description=f"err2issue fingerprint {fp.VERSION}:{fingerprint}",
-            )
-            if not claimed:
-                # Another replica is creating, or the label outlived a deleted
-                # issue. Re-query with a short bounded backoff before deciding.
-                for attempt in range(CLAIM_RETRIES):
-                    await self._sleep(CLAIM_BACKOFF_SECONDS * (attempt + 1))
-                    existing = await self.client.list_issues_by_label(repo, label, state="all")
-                    if existing:
-                        return await self._record_occurrence(
-                            self._pick(existing), event, fingerprint, repo, correlated
-                        )
-                log.info(
-                    "label %s exists on %s but no issue carries it; "
-                    "treating as orphaned and creating",
-                    label,
-                    repo,
-                )
-
-            return await self._create(event, fingerprint, repo, summary, correlated, label)
-
+            result = await self._file(event, fingerprint, repo, summary, correlated)
         except RepoUnavailable as exc:
-            self._unavailable.add(repo)
-            log.warning("repository %s unavailable, dropping future errors for it: %s", repo, exc)
+            self._mark_unavailable(repo, exc)
             return FiledIssue(action="skipped", fingerprint=fingerprint, repo=repo, detail=str(exc))
+        self._mark_available(repo)
+        return result
+
+    async def _file(
+        self,
+        event: ErrorEvent,
+        fingerprint: str,
+        repo: str,
+        summary: str,
+        correlated: list[LogLine] | None,
+    ) -> FiledIssue:
+        label = fp.label_for(fingerprint)
+        existing = await self.client.list_issues_by_label(repo, label, state="all")
+        if existing:
+            return await self._record_occurrence(
+                self._pick(existing), event, fingerprint, repo, correlated
+            )
+
+        claimed = await self.client.create_label(
+            repo,
+            label,
+            color=LABEL_COLOR,
+            description=f"err2issue fingerprint {fp.VERSION}:{fingerprint}",
+        )
+        if not claimed:
+            # Another replica is creating, or the label outlived a deleted
+            # issue. Re-query with a short bounded backoff before deciding.
+            for attempt in range(CLAIM_RETRIES):
+                await self._sleep(CLAIM_BACKOFF_SECONDS * (attempt + 1))
+                existing = await self.client.list_issues_by_label(repo, label, state="all")
+                if existing:
+                    return await self._record_occurrence(
+                        self._pick(existing), event, fingerprint, repo, correlated
+                    )
+            log.info(
+                "label %s exists on %s but no issue carries it; treating as orphaned and creating",
+                label,
+                repo,
+            )
+
+        return await self._create(event, fingerprint, repo, summary, correlated, label)
+
+    # -- repository availability -------------------------------------------
+    #
+    # What lands here is a 410: GitHub's answer when a repository has Issues
+    # disabled. (A 404 on the issues endpoint stays a plain GitHubError — it is
+    # counted as a failure and retried on the next error, which is right, since
+    # a 404 there can also mean a permissions blip.) Retrying a 410 once per
+    # error would burn quota for nothing, so the first one suppresses the rest.
+    #
+    # But "Issues disabled" is a repository *setting*, not a fact of nature:
+    # somebody turns it off during a migration and back on an hour later.
+    # Remembering it until the pod restarts turns a temporary setting into
+    # indefinite data loss on a replica that keeps reporting Ready — with one
+    # log line, hours earlier, as the only trace. So the memory expires, every
+    # lapse re-logs, and /metrics carries a gauge and a counter for it.
+
+    def _cooling_down(self, repo: str) -> float | None:
+        """Seconds left on this repo's cooldown, or None if it should be tried."""
+        deadline = self._unavailable.get(repo)
+        if deadline is None:
+            return None
+        remaining = deadline - self._clock()
+        if remaining > 0:
+            return remaining
+        # Left in the map until the probe resolves it, so that a still-broken
+        # repo re-arms rather than silently reverting to "fine".
+        log.info("repository %s cooldown expired; probing again", repo)
+        return None
+
+    def _mark_unavailable(self, repo: str, exc: RepoUnavailable) -> None:
+        self.unavailable_events += 1
+        self._unavailable[repo] = self._clock() + self.unavailable_cooldown_seconds
+        log.warning(
+            "repository %s unavailable, dropping its errors for %.0fs: %s",
+            repo,
+            self.unavailable_cooldown_seconds,
+            exc,
+        )
+
+    def _mark_available(self, repo: str) -> None:
+        if self._unavailable.pop(repo, None) is not None:
+            log.info("repository %s is reachable again", repo)
+
+    def health(self) -> dict:
+        """Availability state, for /stats and /metrics."""
+        now = self._clock()
+        return {
+            "unavailable_repos": {
+                repo: round(max(0.0, deadline - now), 1)
+                for repo, deadline in self._unavailable.items()
+            },
+            "unavailable_events": self.unavailable_events,
+        }
 
     # -- helpers -----------------------------------------------------------
 

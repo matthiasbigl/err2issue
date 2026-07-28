@@ -176,7 +176,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         service: Service = request.app.state.service
         content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
         encoding = (request.headers.get("content-encoding") or "").strip().lower()
-        body = await request.body()
+
+        try:
+            body = await _read_body(request)
+        except _BodyTooLarge as exc:
+            return _error(413, str(exc), content_type)
 
         try:
             body = _decompress(body, encoding)
@@ -250,6 +254,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "# TYPE err2issue_dropped_backpressure_total counter\n"
             f"err2issue_dropped_backpressure_total {service.dropped_backpressure}\n"
         )
+        # A repository going unavailable drops every error routed to it while
+        # /readyz stays green — deliberately, since the failure is per-repo and
+        # restarting the pod does not fix it. These are the only signals that
+        # say it is happening, so they are worth alerting on.
+        health = service.pipeline.sink.health()
+        if "unavailable_repos" in health:
+            text += (
+                "# HELP err2issue_repos_unavailable Repositories currently in "
+                "the unavailable cooldown, dropping their errors.\n"
+                "# TYPE err2issue_repos_unavailable gauge\n"
+                f"err2issue_repos_unavailable {len(health['unavailable_repos'])}\n"
+                "# HELP err2issue_repo_unavailable_total Times a repository was "
+                "marked unavailable.\n"
+                "# TYPE err2issue_repo_unavailable_total counter\n"
+                f"err2issue_repo_unavailable_total {health['unavailable_events']}\n"
+            )
         return Response(content=text, media_type="text/plain; version=0.0.4")
 
     @app.get("/stats")
@@ -268,6 +288,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "suppression": service.pipeline.suppressor.stats(),
             "traces_buffered": len(service.pipeline.traces),
             "metrics": service.pipeline.metrics.as_dict(),
+            "sink_health": service.pipeline.sink.health(),
         }
 
     return app
@@ -281,6 +302,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 # default-configured collector fails to parse and 400s. Found by running a real
 # collector against the service, not by reading the spec.
 _MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
+
+
+class _BodyTooLarge(Exception):
+    """The request body exceeded the ingest ceiling before it was even decoded."""
+
+
+async def _read_body(request: Request) -> bytes:
+    """Read the body, refusing anything past the post-decompression ceiling.
+
+    `await request.body()` buffers the whole request with no bound, so an
+    uncompressed payload was limited only by the container's memory limit —
+    while a *compressed* one was capped at 64MB by `_bounded`. The uncompressed
+    path is the easier one to send, so it needs the same ceiling. Streaming
+    means an oversized body is refused partway through rather than after it has
+    all been buffered.
+    """
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > _MAX_DECOMPRESSED_BYTES:
+        raise _BodyTooLarge(
+            f"body of {declared} bytes exceeds {_MAX_DECOMPRESSED_BYTES}; refusing to read"
+        )
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > _MAX_DECOMPRESSED_BYTES:
+            raise _BodyTooLarge(f"body exceeds {_MAX_DECOMPRESSED_BYTES} bytes; refusing to read")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _decompress(body: bytes, encoding: str) -> bytes:

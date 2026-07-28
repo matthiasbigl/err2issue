@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     """Reopen a closed issue when its error recurs (regression detection)."""
     max_comment_per_issue_per_hour: int = 4
     """Cap occurrence comments so a long-running error does not spam one issue."""
+    repo_unavailable_cooldown_seconds: int = 900
+    """How long a repo that answered 404/410 is skipped before being probed again.
+    404 is usually permanent, but a rotated token looks identical — without an
+    expiry that is indefinite silent data loss on a pod reporting Ready."""
 
     # ---- noise control ----
     suppress_window_seconds: int = 600
@@ -200,6 +204,7 @@ class Settings(BaseSettings):
             ("E2I_MAX_DISPATCHES_PER_MINUTE", self.max_dispatches_per_minute),
             ("E2I_MAX_NEW_FINGERPRINTS_PER_DAY", self.max_new_fingerprints_per_day),
             ("E2I_TRACE_BUFFER_SIZE", self.trace_buffer_size),
+            ("E2I_REPO_UNAVAILABLE_COOLDOWN_SECONDS", self.repo_unavailable_cooldown_seconds),
             ("E2I_PORT", self.port),
         ):
             if value <= 0:

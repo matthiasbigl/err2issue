@@ -159,7 +159,7 @@ jobs:
 
             err2issue filed it from production OpenTelemetry data, in a fixed
             format you can rely on:
-              - `<!-- err2issue: fingerprint=<hash> version=v1 count=<N> -->`
+              - `<!-- err2issue: fingerprint=<hash> version=<vN> count=<N> -->`
                 — the stable identity of this bug.
               - A table: service, version, severity, trace id.
               - `### Exception` — type and message.
@@ -248,7 +248,7 @@ jobs:
             closes on merge. If the error recurs afterwards, err2issue reopens
             the same issue — that is the regression signal working correctly.
 
-            **Never remove the `err2issue-fp-v1-...` label.** It is the
+            **Never remove an `err2issue-fp-*` label**, of any version. It is the
             deduplication key. Removing it makes err2issue file a duplicate the
             next time this error occurs.
 
