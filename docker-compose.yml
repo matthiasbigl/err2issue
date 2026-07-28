@@ -41,7 +41,7 @@ services:
     cap_drop: ["ALL"]
 
   collector:
-    image: otel/opentelemetry-collector-contrib:0.116.1
+    image: otel/opentelemetry-collector-contrib:0.140.0
     restart: unless-stopped
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:

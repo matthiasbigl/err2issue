@@ -161,9 +161,30 @@ Things that have already cost someone time.
 
 ### OTLP
 
+- **The collector gzips request bodies by default.** `otlphttp` enables
+  compression unless told otherwise, and ASGI servers do not decompress request
+  bodies — so a receiver that ignores `Content-Encoding` 400s on *every* export
+  from a default-configured collector. This shipped broken and was only caught
+  by running a real collector against the service; the unit tests all passed.
+  Handled in `app.py:_decompress` (gzip, deflate, raw deflate, identity) with a
+  64 MiB ceiling against decompression bombs.
 - **Collectors send protobuf *or* JSON** depending on the exporter's `encoding`.
   Supporting one is a silent deployment trap: the receiver 415s and the
   collector retries forever.
+- **The filter processor DROPS what matches**, it does not keep it. The
+  condition describes what to throw away. Getting this backwards silently
+  forwards everything *except* errors.
+- **`log_conditions:` does not exist in any released contrib build.** Upstream
+  docs on `main` describe it, but 0.140.0 rejects it with
+  `has invalid keys: log_conditions`. Use `logs: { log_record: [...] }`.
+  Validate with
+  `docker run --rm -v $PWD/cfg.yaml:/c.yaml otel/opentelemetry-collector-contrib:0.140.0 validate --config=/c.yaml`.
+- **An errors-only filter means no correlated log lines, ever.** err2issue's
+  trace ring buffer can only correlate records it receives, so filtering to
+  errors upstream leaves that issue section permanently empty (`context_lines`
+  stays 0 on `/stats`). Forwarding INFO-and-above fixes it at a real volume
+  cost. Both configurations are documented in the collector config and both
+  have been verified end-to-end.
 - The **JSON mapping permits both camelCase and snake_case** field names. Both
   are handled in `otlp.py`; do not "simplify" that away.
 - Severity: **17–20 is ERROR, 21–24 is FATAL**, so `>= 17` covers both.
@@ -181,6 +202,15 @@ Things that have already cost someone time.
   offset that changes on every recompile.
 - **Never edit the v1 rules in place.** Ship `v2`. An in-place edit
   re-fingerprints every error in every deployment at once, with no signal.
+
+### Anthropic API
+
+- **Do not put `effort` and `format` in the same `output_config`.** Each is
+  documented on its own; the combination is not, and an unrecognised shape
+  would 400 on every call — which fails *silently* here, because enrichment
+  falls back to the deterministic title by design. `ai.py` sends only `format`.
+- A refusal is **HTTP 200 with `stop_reason: "refusal"`**, not an exception.
+  Check `stop_reason` before reading `content`.
 
 ### Everything else
 

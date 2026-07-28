@@ -282,3 +282,86 @@ def test_workers_are_cancelled_on_shutdown():
 
 def test_asyncio_is_available_for_the_suite():
     assert asyncio.get_event_loop_policy() is not None
+
+
+# -- compression -----------------------------------------------------------
+# The collector's otlphttp exporter enables gzip by default, so most real
+# traffic arrives compressed. A receiver that ignores Content-Encoding 400s on
+# every export from a default-configured collector.
+
+
+def test_gzip_json_export_is_accepted(client):
+    import gzip
+
+    body = gzip.compress(json.dumps(otlp_json()).encode())
+    response = client.post(
+        "/v1/logs",
+        content=body,
+        headers={"content-type": "application/json", "content-encoding": "gzip"},
+    )
+    assert response.status_code == 200
+    drain(client)
+    assert client.app.state.service.pipeline.metrics.error_events == 1
+
+
+def test_gzip_protobuf_export_is_accepted(client):
+    import gzip
+
+    response = client.post(
+        "/v1/logs",
+        content=gzip.compress(build_protobuf()),
+        headers={"content-type": "application/x-protobuf", "content-encoding": "gzip"},
+    )
+    assert response.status_code == 200
+    drain(client)
+    assert client.app.state.service.pipeline.metrics.error_events == 1
+
+
+def test_deflate_export_is_accepted(client):
+    import zlib
+
+    response = client.post(
+        "/v1/logs",
+        content=zlib.compress(json.dumps(otlp_json()).encode()),
+        headers={"content-type": "application/json", "content-encoding": "deflate"},
+    )
+    assert response.status_code == 200
+
+
+def test_identity_encoding_is_treated_as_uncompressed(client):
+    response = client.post(
+        "/v1/logs",
+        content=json.dumps(otlp_json()),
+        headers={"content-type": "application/json", "content-encoding": "identity"},
+    )
+    assert response.status_code == 200
+
+
+def test_corrupt_gzip_returns_400_not_500(client):
+    response = client.post(
+        "/v1/logs",
+        content=b"this is definitely not gzip",
+        headers={"content-type": "application/json", "content-encoding": "gzip"},
+    )
+    assert response.status_code == 400
+    assert "gzip" in response.json()["error"]
+
+
+def test_unsupported_encoding_is_rejected(client):
+    response = client.post(
+        "/v1/logs",
+        content=b"x",
+        headers={"content-type": "application/json", "content-encoding": "br"},
+    )
+    assert response.status_code == 400
+
+
+def test_decompression_bomb_is_refused():
+    """A 64 MiB ceiling stops a tiny payload from expanding into memory pressure."""
+    import gzip
+
+    from err2issue.app import _MAX_DECOMPRESSED_BYTES, _decompress
+
+    bomb = gzip.compress(b"\0" * (_MAX_DECOMPRESSED_BYTES + 1))
+    with pytest.raises(ValueError, match="exceeds"):
+        _decompress(bomb, "gzip")

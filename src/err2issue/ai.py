@@ -128,9 +128,15 @@ class Enricher:
             model=self.model,
             max_tokens=1024,
             system=_SYSTEM,
-            # Low effort: this is a short, scoped, latency-sensitive summarization,
-            # not a reasoning task. Thinking stays on (the default on Opus 5).
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": _SCHEMA}},
+            # `output_config` carries only `format` here. The API also accepts an
+            # `effort` key, and setting it to "low" would suit a task this small
+            # — but combining `effort` with `format` in one `output_config` is
+            # not documented, and an unrecognised shape would 400 on every call,
+            # silently pinning enrichment to the fallback title forever. This
+            # runs once per NEW issue (suppression and dedup absorb the rest),
+            # so the default effort costs little and the shape is the documented
+            # one: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+            output_config={"format": {"type": "json_schema", "schema": _SCHEMA}},
             messages=[{"role": "user", "content": self._prompt(event)}],
         )
 

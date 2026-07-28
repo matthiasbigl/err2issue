@@ -175,7 +175,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def receive_logs(request: Request) -> Response:
         service: Service = request.app.state.service
         content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        encoding = (request.headers.get("content-encoding") or "").strip().lower()
         body = await request.body()
+
+        try:
+            body = _decompress(body, encoding)
+        except ValueError as exc:
+            return _error(400, str(exc), content_type)
 
         try:
             if content_type in otlp.PROTOBUF_CONTENT_TYPES:
@@ -265,6 +271,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     return app
+
+
+# -- request decoding ------------------------------------------------------
+
+# The OTLP/HTTP spec allows gzip, and the collector's otlphttp exporter enables
+# it by default — so in practice most real traffic arrives compressed. ASGI
+# servers do not decompress request bodies, so without this every export from a
+# default-configured collector fails to parse and 400s. Found by running a real
+# collector against the service, not by reading the spec.
+_MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
+
+
+def _decompress(body: bytes, encoding: str) -> bytes:
+    if not encoding or encoding == "identity":
+        return body
+
+    if encoding == "gzip":
+        import gzip
+        import zlib
+
+        try:
+            return _bounded(gzip.decompress(body))
+        except (OSError, zlib.error) as exc:
+            raise ValueError(f"body is not valid gzip: {exc}") from exc
+
+    if encoding in ("deflate", "zlib"):
+        import zlib
+
+        try:
+            return _bounded(zlib.decompress(body))
+        except zlib.error:
+            try:  # raw deflate, no zlib header
+                return _bounded(zlib.decompress(body, -zlib.MAX_WBITS))
+            except zlib.error as exc:
+                raise ValueError(f"body is not valid deflate: {exc}") from exc
+
+    raise ValueError(f"unsupported content-encoding {encoding!r}")
+
+
+def _bounded(data: bytes) -> bytes:
+    """Guard against a decompression bomb from a misconfigured or hostile sender."""
+    if len(data) > _MAX_DECOMPRESSED_BYTES:
+        raise ValueError(
+            f"decompressed body exceeds {_MAX_DECOMPRESSED_BYTES} bytes; refusing to parse"
+        )
+    return data
 
 
 # -- OTLP response helpers -------------------------------------------------

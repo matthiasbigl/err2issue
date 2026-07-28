@@ -64,13 +64,14 @@ async def test_model_output_is_used_when_available():
     assert result.summary == "Because x."
 
 
-async def test_request_uses_structured_output_and_low_effort():
+async def test_request_uses_only_the_documented_output_config_shape():
     client = FakeClient(result=good_response())
     await Enricher(client=client).enrich(make_event())
     kwargs = client.messages.calls[0]
     assert kwargs["output_config"]["format"]["type"] == "json_schema"
-    # A short, latency-sensitive summarization does not need deep reasoning.
-    assert kwargs["output_config"]["effort"] == "low"
+    # Only `format` goes in output_config: combining it with `effort` is an
+    # undocumented shape, and a 400 there would silently disable enrichment.
+    assert set(kwargs["output_config"]) == {"format"}
     assert kwargs["model"] == "claude-opus-5"
 
 

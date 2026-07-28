@@ -25,20 +25,58 @@ processors:
   # Keep only records that are actually errors. Everything else never leaves
   # the collector, so err2issue sees a tiny fraction of your log volume.
   #
-  # OTel severity numbers: 17-20 = ERROR, 21-24 = FATAL.
-  # The second clause catches handled-and-logged exceptions that were recorded
-  # at a lower severity but still carry exception semantic-convention
-  # attributes — those are real errors worth filing.
+  # NOTE ON DIRECTION: the filter processor DROPS records that match. This
+  # condition therefore describes what to throw away, not what to keep.
+  #
+  # OTel severity numbers: 17-20 = ERROR, 21-24 = FATAL, so `< ERROR` drops
+  # everything below both. The second clause is what keeps handled-and-logged
+  # exceptions: those are often recorded below ERROR severity but still carry
+  # the exception semantic-convention attributes, and they are real errors
+  # worth filing. Written as an AND, a record survives if it is either severe
+  # enough OR carries an exception.
+  #
+  # Verified against otel/opentelemetry-collector-contrib:0.140.0 with
+  # `otelcol validate`. Upstream docs on main describe a newer `log_conditions:`
+  # key, but no released contrib build accepts it yet — it fails config
+  # unmarshalling with `has invalid keys: log_conditions`. Use this form.
   filter/errors_only:
     error_mode: ignore
     logs:
       log_record:
         - 'severity_number < SEVERITY_NUMBER_ERROR and attributes["exception.type"] == nil'
 
-  # >>> OPTIONAL <<<
-  # err2issue needs service.name to route. If your resource detection does not
-  # always set it, uncomment this to guarantee a value rather than having
-  # errors land in the fallback repository.
+  # >>> OPTIONAL: correlated log lines <<<
+  #
+  # READ THIS IF YOU WANT THE "Correlated log lines" SECTION IN YOUR ISSUES.
+  #
+  # `filter/errors_only` above forwards ONLY error records. err2issue therefore
+  # never sees the INFO/DEBUG lines that preceded a failure, and the correlated
+  # log section of the issue will always be empty. Verified end-to-end: with the
+  # errors-only filter, `context_lines` on /stats stays at 0.
+  #
+  # The collector is stateless and cannot forward "the ten lines before an
+  # error", so getting that context means forwarding more than errors. Swap
+  # `filter/errors_only` for this in the err2issue pipeline to do that:
+  #
+  #   filter/errors_and_context:
+  #     error_mode: ignore
+  #     logs:
+  #       log_record:
+  #         - 'severity_number < SEVERITY_NUMBER_INFO'
+  #
+  # Trade-off, stated plainly: err2issue now receives your INFO-and-above log
+  # volume rather than just errors. It holds them in a bounded in-memory ring
+  # buffer keyed by trace id (E2I_TRACE_BUFFER_SIZE, default 500 traces),
+  # drops them after the lookup, and never writes them anywhere except into an
+  # issue that an error actually produced. Nothing is persisted. But it is real
+  # network and CPU cost, so measure before enabling it on a high-volume service.
+  #
+  # Middle ground: keep errors-only in production and enable this on the one or
+  # two services whose failures are hardest to diagnose from a stack trace alone.
+
+  # >>> OPTIONAL: guarantee a routing key <<<
+  # err2issue routes on service.name. If your resource detection does not always
+  # set it, this keeps such errors out of the fallback repository.
   # transform/ensure_service_name:
   #   error_mode: ignore
   #   log_statements:
