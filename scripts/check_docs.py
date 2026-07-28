@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Check the documentation the way CI checks the code.
 
-Three things, all offline:
+Four things, all offline, all of them mistakes that look fine in a diff and
+wrong on the rendered page:
 
 1. Every relative Markdown link resolves — to a file, and to a heading when the
    link carries a `#fragment`.
-2. Every ```mermaid block is closed and obeys the rules in
+2. No `---` divider sits directly under text, where Markdown reads it as a
+   setext heading rather than a rule.
+3. Every ```mermaid block is closed and obeys the rules in
    docs/diagrams/README.md that a parser cannot catch on its own (a block can be
    syntactically valid and still render as an unreadable mess).
-3. Every block is written out for rendering, so CI can hand them to
+4. Every block is written out for rendering, so CI can hand them to
    mermaid-cli. A Mermaid syntax error is invisible until it ships as a red
    error box on the repository's front page.
 
@@ -59,13 +62,20 @@ def markdown_files() -> list[pathlib.Path]:
 
 
 def slug(heading: str) -> str:
-    """GitHub's heading-anchor slug, near enough for our own documents."""
+    """GitHub's heading-anchor slug, near enough for our own documents.
+
+    `github-slugger` strips punctuation and then runs `.replace(/ /g, "-")`,
+    replacing each space individually with no collapsing pass. So a heading like
+    "Closing the loop: issue -> fix" loses two characters between two spaces and
+    keeps *both* of them: `closing-the-loop-issue--fix`. Collapsing runs here
+    would reject links that GitHub resolves perfectly well.
+    """
     text = re.sub(r"`([^`]*)`", r"\1", heading)  # code spans keep their text
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)  # links keep their text
     text = re.sub(r"[*_~]", "", text)
     text = text.strip().lower()
     text = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE)
-    return re.sub(r"\s+", "-", text)
+    return text.replace(" ", "-")
 
 
 def anchors(path: pathlib.Path) -> set[str]:
@@ -105,6 +115,39 @@ def check_links(problems: Problems) -> None:
                 anchor_cache[resolved] = anchors(resolved)
             if fragment.lower() not in anchor_cache[resolved]:
                 problems.add(path, line, f"link to a missing heading: {target}")
+
+
+def check_accidental_setext(path: pathlib.Path, problems: Problems) -> None:
+    """A `---` rule directly under text is an H2, not a rule.
+
+    Markdown's setext syntax turns `text\\n---` into a heading, so dropping the
+    blank line before a section divider silently promotes the paragraph above it
+    to a heading — and adds a phantom entry to the document outline. Invisible in
+    a diff, obvious on the rendered page.
+    """
+    lines = path.read_text(encoding="utf-8").split("\n")
+    fenced = False
+    start = 1 if lines and lines[0].strip() == "---" else 0  # skip YAML frontmatter
+
+    if start:
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                start = i + 1
+                break
+
+    for i in range(start, len(lines)):
+        if FENCE.match(lines[i]):
+            fenced = not fenced
+            continue
+        if fenced or not re.fullmatch(r"-{3,}\s*", lines[i]):
+            continue
+        previous = lines[i - 1].strip() if i else ""
+        if previous and not previous.startswith(("|", ">")):
+            problems.add(
+                path,
+                i + 1,
+                "'---' directly under text renders as a heading — add a blank line",
+            )
 
 
 def mermaid_blocks(path: pathlib.Path, problems: Problems) -> list[tuple[int, str]]:
@@ -196,6 +239,7 @@ def main() -> int:
 
     count = 0
     for path in markdown_files():
+        check_accidental_setext(path, problems)
         for index, (first_line, source) in enumerate(mermaid_blocks(path, problems), 1):
             count += 1
             check_mermaid(path, first_line, source, problems)
