@@ -1,4 +1,8 @@
 ---
+description: Fix a production error reported by err2issue
+# Lets `gh aw update` pull changes from here while keeping your local edits.
+source: matthiasbigl/err2issue/integrations/gh-aw/workflows/err2issue-autofix.md@main
+
 on:
   issues:
     types: [opened, labeled]
@@ -12,6 +16,10 @@ on:
   # everything it files; narrow this to an opt-in label such as `autofix` if you
   # would rather approve issues individually.
   skip-if-no-match: 'label:err2issue'
+  # Who may trigger a run by labelling an issue. This is the gh-aw default,
+  # pinned here because it is a security boundary: without it, anyone who can
+  # label an issue can spend your AI credits.
+  roles: [admin, maintainer, write]
   # Emoji acknowledgement on the triggering issue, so it is obvious the agent
   # picked it up.
   reaction: eyes
@@ -21,12 +29,29 @@ on:
 permissions:
   contents: read
   issues: read
+  # Required by the `pull_requests` toolset, which `toolsets: [default]`
+  # includes. `gh aw compile` warns if you leave it out.
+  pull-requests: read
+  # Bills Copilot inference to the organisation through the built-in
+  # GITHUB_TOKEN, so no COPILOT_GITHUB_TOKEN PAT is needed. Requires the org
+  # policy "Allow use of Copilot CLI billed to the organization". Without both,
+  # the run falls back to per-seat billing and needs that PAT — see README.
+  copilot-requests: write
 
-# `copilot` needs no extra secret on GitHub-hosted runners. To use Claude
-# instead, set `engine: claude` and add ANTHROPIC_API_KEY to repository secrets.
 engine: copilot
 
+# Security validation. Currently the default; pinned because this file is a
+# template other repositories copy, and a security posture should not be
+# inherited silently.
+strict: true
+
 timeout-minutes: 20
+
+# Hard cost ceilings, in AI Credits. gh-aw's own default daily cap is 5000 AIC
+# (~$50); these are deliberately lower, because one bug fix is not a research
+# project. Raise them once you have seen real runs in `gh aw logs`.
+max-ai-credits: 300
+max-daily-ai-credits: 2000
 
 tools:
   github:
@@ -49,6 +74,13 @@ safe-outputs:
     title-prefix: "[err2issue] "
     labels: [automated, err2issue-fix]
     draft: true
+    # A pull request opened with the built-in GITHUB_TOKEN does not start CI —
+    # GitHub blocks that to prevent workflow recursion. Setting a repository
+    # secret named GH_AW_CI_TRIGGER_TOKEN (a fine-grained PAT with
+    # Contents: Read & Write) is picked up automatically; this line is the
+    # explicit form. Delete it if you set the magic secret name instead, or if
+    # you are happy reviewing agent PRs with no checks. See README.
+    github-token-for-extra-empty-commit: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}
   add-comment:
     max: 1
   missing-tool:

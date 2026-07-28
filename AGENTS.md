@@ -214,9 +214,11 @@ Unresolved. Pick one up if you are looking for work.
 - **The label-mutex race is narrowed, not closed.** A process paused between
   creating the label and creating the issue can still produce a duplicate. The
   window is one HTTP round-trip. Worth measuring before engineering further.
-- **`gh aw compile` is unverified.** The gh-aw workflow's frontmatter parses and
-  uses documented fields only, but the extension could not be installed in the
-  environment where it was written. Someone should compile it and report back.
+- **A real gh-aw run is unverified.** The workflow now compiles clean on gh-aw
+  v0.83.4 and CI keeps it that way, but nobody has watched it actually fix a bug
+  and open a pull request. Compiling proves the configuration is valid, not that
+  the prompt works. Someone with a repository receiving real err2issue issues
+  should run it and report back.
 - **Per-language frame normalization.** Currently one language-agnostic rule
   set. PLAN.md §11 left this open and it is still open; refine with fixtures,
   and ship any change as `v3` — v2 is released.
