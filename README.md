@@ -176,7 +176,6 @@ See [docs/DEPLOY.md](docs/DEPLOY.md).
 | [docs/DEPLOY.md](docs/DEPLOY.md) | Collector config, GitHub App setup, org routing, Kubernetes |
 | [docs/ISSUE_CONTRACT.md](docs/ISSUE_CONTRACT.md) | The issue format, for consumers and producers |
 | [docs/FINGERPRINT.md](docs/FINGERPRINT.md) | Normalization rules and the versioning policy |
-| [CHALLENGE.md](CHALLENGE.md) | Design review of PLAN.md |
 | [AGENTS.md](AGENTS.md) | Repository conventions, gotchas, accumulated context |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, tests, Conventional Commits |
 
