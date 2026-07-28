@@ -20,15 +20,14 @@ UI, and the notification system.**
 flowchart LR
     A["your apps"] -->|OTLP| C["OTel Collector"]
     C --> B["your existing backend<br/><i>unchanged</i>"]
-    C -->|"filtered: errors only"| E["err2issue"]
 
     subgraph E2I ["err2issue — one small container"]
         direction TB
         R["redact"] --> F["fingerprint"] --> S["suppress"] --> RT["route"] --> AI["AI title"]
     end
 
-    E --> E2I
-    E2I -->|"REST: create · comment · reopen"| G["GitHub Issue<br/><b>[x12] NullReference in profile-service</b>"]
+    C -->|"filtered:<br/>errors only"| R
+    AI -->|"REST: create · comment · reopen"| G["GitHub Issue<br/><b>[x12] NullReference in profile-service</b>"]
     G -.->|"the issue is the API"| X["fix agent · triage · dashboards"]
 ```
 
@@ -41,17 +40,17 @@ change only**, and removing it is a one-line revert.
 flowchart TD
     IN["POST /v1/logs<br/>protobuf or JSON"] --> DEC["decode"]
     DEC --> SEL{"severity ≥ ERROR<br/>or exception.type?"}
-    SEL -->|no| BUF["→ trace ring buffer<br/>(context for later errors)"]
+    SEL -->|no| BUF["trace ring buffer<br/><i>context for later errors</i>"]
     SEL -->|yes| RED["redact secrets"]
     RED --> FP["fingerprint<br/>sha256(service + type + normalized frame)"]
     FP --> SUP{"suppressed?"}
-    SUP -->|"window · rate cap · daily budget"| DROP["drop + count"]
+    SUP -->|yes| DROP["drop + count<br/><i>window · rate cap · daily budget</i>"]
     SUP -->|no| ROUTE["route: service.name → owner/repo"]
     ROUTE --> ENR["AI title<br/><i>falls back deterministically</i>"]
     ENR --> LOOK{"issue with this<br/>fingerprint label?"}
-    LOOK -->|"open"| CMT["bump [xN] + comment"]
-    LOOK -->|"closed"| REO["reopen — regression"]
-    LOOK -->|"none"| NEW["claim label → create issue"]
+    LOOK -->|open| CMT["bump [xN] + comment"]
+    LOOK -->|closed| REO["reopen — regression"]
+    LOOK -->|none| NEW["claim label → create issue"]
 ```
 
 Ordering is deliberate. Redaction runs before fingerprinting, so a leaked token
@@ -177,9 +176,10 @@ See [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ```bash
 uv sync --group dev
-uv run pytest                      # 270 tests
-uv run ruff check src tests
-uv run ruff format src tests
+uv run pytest                        # full suite, ~6s
+uv run ruff check src tests scripts
+uv run ruff format src tests scripts
+uv run python scripts/check_docs.py  # links + Mermaid conventions
 ```
 
 Nothing in the suite touches the network: `respx` intercepts every GitHub call

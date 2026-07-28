@@ -103,10 +103,11 @@ footer. Read these; do not build a parser on them.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Open: first occurrence — issue created, [x1]
-    Open --> Open: recurrence — count bumps, comment added
-    Open --> Closed: a human or an agent closes it
-    Closed --> Open: regression — reopened, `state_reason: reopened`
+    direction LR
+    [*] --> Open: first occurrence
+    Open --> Open: recurrence
+    Open --> Closed: closed
+    Closed --> Open: regression
     Closed --> [*]: never recurs
 ```
 
@@ -116,9 +117,9 @@ stateDiagram-v2
 occurrence comment (capped at `E2I_MAX_COMMENT_PER_ISSUE_PER_HOUR`, default 4,
 so a chronic error updates its count cheaply without spamming the thread).
 
-**Regression.** A *closed* issue carries the label → reopen it, bump `[xN]`, and
-add a comment headed `### Regression`. Regression comments are never suppressed
-by the budget.
+**Regression.** A *closed* issue carries the label → reopen it with
+`state_reason: reopened`, bump `[xN]`, and add a comment headed `### Regression`.
+Regression comments are never suppressed by the budget.
 
 This is why closing an err2issue issue is meaningful: if the error comes back,
 the same issue reopens. **That reopen is the signal that a fix did not hold**,
@@ -209,7 +210,7 @@ exist. If you write one:
 | Service | `checkout-api` |
 | Version | `1.4.2` |
 | Severity | `ERROR` |
-| Fingerprint | `v1:a3f9c21b8e04` |
+| Fingerprint | `v2:a3f9c21b8e04` |
 | Trace ID | `4bf92f3577b34da6a3ce929d0e0e4736` |
 
 ### Summary

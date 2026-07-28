@@ -21,15 +21,16 @@ touches the network.
 ## The loop
 
 ```bash
-uv run pytest -q                     # fast; run it constantly
-uv run ruff check src tests --fix
-uv run ruff format src tests         # CI enforces this
+uv run pytest -q                          # fast; run it constantly
+uv run ruff check src tests scripts --fix
+uv run ruff format src tests scripts      # CI enforces this
 ```
 
-Before pushing:
+Before pushing — everything CI runs, apart from the Docker build:
 
 ```bash
-uv run ruff check src tests && uv run ruff format --check src tests && uv run pytest -q
+uv run ruff check src tests scripts && uv run ruff format --check src tests scripts \
+  && uv run pytest -q && uv run python scripts/check_docs.py
 ```
 
 ## Commits
@@ -106,9 +107,16 @@ beyond a normal change.
 
 Changing normalization changes the identity of every error in every deployment.
 
-**Do not edit the v1 rules.** Ship `v2`: bump `VERSION`, document the new rules
-alongside the old ones in [docs/FINGERPRINT.md](docs/FINGERPRINT.md), add a v2
-golden-vector test while keeping the v1 one, and note it in AGENTS.md.
+**Never edit a released version's rules in place.** Ship the next one (`vN` →
+`vN+1`): bump `VERSION`, document the new rules alongside the old sections in
+[docs/FINGERPRINT.md](docs/FINGERPRINT.md), *replace* the golden-vector tests
+with ones for the new version — including one that fails under the old rules —
+and note the change in AGENTS.md.
+
+The golden vectors are a replacement rather than an addition on purpose: only
+the current version is ever computed, so a "v1 golden vector" running against v2
+code asserts the current rules under a stale name. The full procedure is
+[docs/FINGERPRINT.md § Versioning](docs/FINGERPRINT.md#versioning).
 
 ### The issue format
 
@@ -124,6 +132,12 @@ Architecture and flow changes need the diagram updated in the same pull request.
 Mermaid by default — it renders on GitHub and diffs as text. For Excalidraw,
 **commit the `.excalidraw` source** to `docs/diagrams/`; a picture with no source
 cannot be edited by the next person.
+
+`uv run python scripts/check_docs.py` checks links and the Mermaid conventions,
+and CI renders every diagram — but neither can see that a layout came out badly.
+**Look at the rendered picture** before you push one:
+[docs/diagrams/README.md](docs/diagrams/README.md) has the conventions and the
+one-liner for rendering locally.
 
 ## Pull requests
 
@@ -141,7 +155,7 @@ fingerprint, the issue format, and the Dockerfile, that is three pull requests.
 
 Include what you would want if you were fixing it: what you did, what happened,
 what you expected, and the output of `GET /stats` if the service was running.
-For a filing bug, the fingerprint (`v1:abc123…`) and the issue URL make it
+For a filing bug, the fingerprint (`v2:abc123…`) and the issue URL make it
 reproducible in seconds.
 
 ## Security

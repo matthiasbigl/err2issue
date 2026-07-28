@@ -24,8 +24,10 @@ $ uv run pytest -q
 ```
 
 - [ ] `uv run pytest` passes
-- [ ] `uv run ruff check src tests` passes
+- [ ] `uv run ruff check src tests scripts` passes
 - [ ] New behaviour has a test that fails without the change
+- [ ] Docs touched? `uv run python scripts/check_docs.py` passes, and any
+      diagram was checked as a rendered picture, not just as a diff
 
 ## Contract impact
 
@@ -34,7 +36,8 @@ $ uv run pytest -q
 
 - [ ] **Fingerprint** (`src/err2issue/fingerprint.py`) — changing the
       normalization rules changes every error's identity. This requires a new
-      `VERSION`, not an edit to `v1`. See [docs/FINGERPRINT.md](../docs/FINGERPRINT.md).
+      `VERSION`, never an edit to the released one. See
+      [docs/FINGERPRINT.md](../docs/FINGERPRINT.md).
 - [ ] **Issue format** (`src/err2issue/context.py`) — consumers parse the
       machine header and the `[xN]` title. See [docs/ISSUE_CONTRACT.md](../docs/ISSUE_CONTRACT.md).
 - [ ] Neither — this change is invisible to existing installs.

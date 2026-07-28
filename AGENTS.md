@@ -9,6 +9,12 @@ thing you can leave behind, and it is cheap.
 
 Keep it pruned. If a note no longer causes anyone to make a mistake, delete it.
 
+**Other `AGENTS.md` files in this repository are not this file.** The ones under
+`integrations/*/` are runbooks for an agent setting up a *consumer* in somebody
+else's repository — they say nothing about changing err2issue. If you are
+editing code here, this file is the one that applies, wherever in the tree you
+are working.
+
 ---
 
 ## What this project is
@@ -31,13 +37,24 @@ Read in this order if you are new:
 uv sync --group dev                       # setup (uv, not pip)
 uv run pytest -q                          # full suite, ~6s, no network
 uv run pytest tests/test_filer.py -q      # one file
-uv run ruff check src tests --fix
-uv run ruff format src tests              # CI enforces this
+uv run ruff check src tests scripts --fix
+uv run ruff format src tests scripts      # CI enforces this
 uv run pytest --cov=err2issue --cov-report=term-missing
+uv run python scripts/check_docs.py       # links + Mermaid conventions
 
 docker build -t err2issue:local .
 E2I_SINK=dry-run E2I_GITHUB_REPO=acme/api uv run err2issue
 ```
+
+Everything CI will run on your branch, in one line:
+
+```bash
+uv run ruff check src tests scripts && uv run ruff format --check src tests scripts \
+  && uv run pytest -q && uv run python scripts/check_docs.py
+```
+
+Line length is 100 (`ruff`, configured in `pyproject.toml`). CI additionally
+renders every Mermaid diagram; see [Diagrams](#diagrams).
 
 ## Layout
 
@@ -58,6 +75,8 @@ src/err2issue/
     auth.py        PAT and GitHub App installation tokens
     client.py      REST client, retries, rate-limit handling
     filer.py       dedup + create/comment/reopen + the label mutex
+scripts/
+  check_docs.py    link + Mermaid checks, run by CI
 ```
 
 `pipeline.py` and `github/filer.py` are where the interesting behaviour lives.
@@ -93,11 +112,19 @@ pipeline is worse than a picture of it.
   reason not to.
 - **Excalidraw** for hand-drawn conceptual diagrams where the sketch quality
   helps. **Commit the `.excalidraw` source to `docs/diagrams/`** so it stays
-  editable — a PNG with no source is a dead end. Export a `.svg` alongside it
-  for embedding.
+  editable — a PNG with no source is a dead end. Markdown cannot render
+  `.excalidraw`, so export an SVG next to the source *if* you embed it, and not
+  otherwise.
 
-`docs/diagrams/` holds the sources. Do not add a diagram to a doc without
-committing whatever generated it.
+`docs/diagrams/` holds the sources and the full conventions:
+[docs/diagrams/README.md](docs/diagrams/README.md). Do not add a diagram to a
+doc without committing whatever generated it.
+
+**Parsing is not rendering.** `scripts/check_docs.py` catches the mistakes that
+make a diagram unreadable rather than invalid, and CI renders every block with
+`mermaid-cli` because a syntax error ships as a red error box on the front page.
+Neither can tell you that a layout is a mess — look at the picture before you
+push one.
 
 ## Commits and pull requests
 
@@ -241,6 +268,25 @@ Things that have already cost someone time.
   falls back to the deterministic title by design. `ai.py` sends only `format`.
 - A refusal is **HTTP 200 with `stop_reason: "refusal"`**, not an exception.
   Check `stop_reason` before reading `content`.
+
+### Documentation and diagrams
+
+- **A valid Mermaid diagram can still be unreadable.** `stateDiagram-v2` places
+  transition labels with no collision detection, so anything longer than two or
+  three words overlaps the neighbouring label and the nodes themselves — the
+  issue lifecycle diagram shipped like that. Keep labels short and put the
+  detail in the prose underneath. This is invisible in review: the diff looks
+  fine, only the rendered picture is wrong.
+- **Backticks are not Markdown inside a Mermaid label.** `` `state_reason` ``
+  renders as literal backtick characters. `<br/>`, `<i>` and `<b>` are the only
+  markup that survives, and they work with or without `htmlLabels`.
+- **Point an edge at a node, not at a subgraph.** `X --> mySubgraph` attaches to
+  the container's boundary wherever the layout engine feels like, which reads as
+  an arrow from nowhere. Name the first node inside instead.
+- **Label both arms of a decision.** One labelled arm and one bare arm reads as
+  though the bare one is the default, whichever way round it is.
+- `scripts/check_docs.py` enforces all four, plus that every relative link and
+  `#heading` anchor resolves. CI then renders each block with `mermaid-cli`.
 
 ### Everything else
 
