@@ -7,6 +7,9 @@ and distinct across genuinely different bugs.
 The rules here are **versioned and frozen**. Changing them changes the identity
 of every error in the world, so a change ships as a new VERSION and old issues
 stay addressable under the old one. See docs/FINGERPRINT.md.
+
+v2 changed one rule: for a Python traceback the *last* `File "` line is the
+frame, not the first. See `top_frame`.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import re
 
-VERSION = "v1"
+VERSION = "v2"
 DIGEST_CHARS = 12
 
 # Lines that introduce a stack but are not themselves frames.
@@ -33,8 +36,9 @@ _PREAMBLE = re.compile(
 )
 
 # Markers that identify a line as a genuine stack frame, across ecosystems.
+_PYTHON_FRAME = re.compile(r'^\s*File\s+"')
 _FRAME_MARKERS = (
-    re.compile(r'^\s*File\s+"'),  # Python
+    _PYTHON_FRAME,  # Python
     re.compile(r"^\s*at\s+\S"),  # Java / JS / .NET
     re.compile(r"^\s*from\s+\S+:\d+"),  # Ruby "from"
     re.compile(r":\d+:in\s"),  # Ruby
@@ -85,7 +89,19 @@ def normalize_frame(frame: str) -> str:
 
 
 def top_frame(stacktrace: str | None) -> str | None:
-    """Return the first genuine stack frame line, or None if there is no stack."""
+    """Return the frame where the error was raised, or None if there is no stack.
+
+    "Top" means innermost — the error site, not the entry point that funnelled
+    the call there. Java, JavaScript, .NET, Ruby, PHP and Go all print innermost
+    first, so the first recognisable frame is the right one.
+
+    Python is the exception: it prints outermost first, so the innermost frame is
+    the *last* `File "` line. Taking the first identifies every error by whatever
+    handler it surfaced through, which for a web service means unrelated bugs
+    collapse into one issue and every one after the first is invisible except as
+    a bumped count. Under exception chaining the last `File "` line belongs to
+    the final traceback, which is the exception `exception.type` names.
+    """
     if not stacktrace:
         return None
     candidates = []
@@ -94,6 +110,13 @@ def top_frame(stacktrace: str | None) -> str | None:
         if not line or _PREAMBLE.match(line):
             continue
         candidates.append(raw)
+    # Only `File "` lines are eligible here. A Python traceback interleaves
+    # source excerpts with its frames, and some of those match the looser
+    # markers — `    total()` reads as a Go function line — so scanning "last
+    # line matching any marker" would pick a source excerpt, not a frame.
+    python_frames = [raw for raw in candidates if _PYTHON_FRAME.search(raw)]
+    if python_frames:
+        return python_frames[-1].strip()
     for raw in candidates:
         if any(marker.search(raw) for marker in _FRAME_MARKERS):
             return raw.strip()
@@ -138,7 +161,7 @@ def label_for(fingerprint: str, version: str = VERSION) -> str:
     """The GitHub label that carries this fingerprint.
 
     Length budget: GitHub caps label names at 50 characters.
-    "err2issue-fp-" (13) + "v1-" (3) + 12 = 28. Room for v10+ and a longer digest.
+    "err2issue-fp-" (13) + "v2-" (3) + 12 = 28. Room for v10+ and a longer digest.
     """
     return f"err2issue-fp-{version}-{fingerprint}"
 

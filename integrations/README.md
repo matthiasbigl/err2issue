@@ -43,7 +43,7 @@ Every consumer, including one you write yourself, follows the same three steps:
 2. **Parse** — the body is a documented format. Read
    [docs/ISSUE_CONTRACT.md](../docs/ISSUE_CONTRACT.md) before writing a parser;
    the machine-readable header is the part you are guaranteed.
-3. **Act, and leave the label alone** — the `err2issue-fp-v1-<hash>` label is the
+3. **Act, and leave the label alone** — the `err2issue-fp-<version>-<hash>` label is the
    deduplication key. Removing it makes err2issue file a duplicate the next time
    the error occurs. Closing the issue is fine and expected: if the error comes
    back, err2issue reopens the same issue, which is exactly how you learn that a

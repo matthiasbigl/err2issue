@@ -133,7 +133,7 @@ carrying `TRIGGER_LABEL`.
 edited, or the Claude GitHub App is not installed on this repository.
 
 **The agent removed the fingerprint label.** Re-add it:
-`gh issue edit <n> --add-label err2issue-fp-v1-<hash>`. Without it err2issue
+`gh issue edit <n> --add-label err2issue-fp-<version>-<hash>`. Without it err2issue
 cannot find the issue and will file a duplicate on the next occurrence. The
 shipped prompts tell the agent not to do this.
 

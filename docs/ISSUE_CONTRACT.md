@@ -18,9 +18,9 @@ everything marked stable.**
 │      occurrence count      short description (≤ 70 chars)      │
 ├────────────────────────────────────────────────────────────────┤
 │ LABELS  err2issue                    ← every issue err2issue files
-│         err2issue-fp-v1-a3f9c21b8e04 ← the deduplication key
+│         err2issue-fp-v2-a3f9c21b8e04 ← the deduplication key
 ├────────────────────────────────────────────────────────────────┤
-│ BODY    <!-- err2issue: fingerprint=… version=v1 count=12 -->  │ ← machine
+│ BODY    <!-- err2issue: fingerprint=… version=v2 count=12 -->  │ ← machine
 │         **`TypeError`** in **checkout-api**                    │
 │         | table: first/last seen, service, version, trace |    │
 │         ### Summary        ← AI-written, or absent             │
@@ -38,7 +38,7 @@ everything marked stable.**
 Always the first line of the body:
 
 ```html
-<!-- err2issue: fingerprint=a3f9c21b8e04 version=v1 count=12 -->
+<!-- err2issue: fingerprint=a3f9c21b8e04 version=v2 count=12 -->
 ```
 
 ```python
@@ -70,7 +70,7 @@ which is allowed and preserved. When err2issue re-counts, it takes
 | Label | Meaning |
 |---|---|
 | `err2issue` | Filed by err2issue. Filter on this. |
-| `err2issue-fp-v1-<12 hex>` | The fingerprint. **The deduplication key.** |
+| `err2issue-fp-<version>-<12 hex>` | The fingerprint. **The deduplication key.** Current version `v2`; issues filed before a bump keep the older label. |
 
 Additional labels are configurable via `E2I_ISSUE_LABELS` and may be added
 freely by humans or agents.
@@ -197,7 +197,7 @@ exist. If you write one:
 ## Full example
 
 ```markdown
-<!-- err2issue: fingerprint=a3f9c21b8e04 version=v1 count=12 -->
+<!-- err2issue: fingerprint=a3f9c21b8e04 version=v2 count=12 -->
 
 **`TypeError`** in **checkout-api**
 

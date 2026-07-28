@@ -69,7 +69,7 @@ async def test_created_issue_body_carries_the_machine_header():
 
     assert parse_header(body_of(create)["body"]) == {
         "fingerprint": FINGERPRINT,
-        "version": "v1",
+        "version": "v2",
         "count": 1,
     }
 
@@ -328,5 +328,5 @@ async def test_lookup_uses_the_versioned_fingerprint_label():
         await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
 
     params = listing.calls[0].request.url.params
-    assert params["labels"] == f"err2issue-fp-v1-{FINGERPRINT}"
+    assert params["labels"] == f"err2issue-fp-v2-{FINGERPRINT}"
     assert params["state"] == "all"

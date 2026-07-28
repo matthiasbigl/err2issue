@@ -38,7 +38,7 @@ async def test_dry_run_records_the_action_without_writing():
     assert result.action == "dry-run"
     assert sink.calls[0]["repo"] == REPO
     assert sink.calls[0]["title"] == "[x1] A title"
-    assert sink.calls[0]["label"] == "err2issue-fp-v1-abc123def456"
+    assert sink.calls[0]["label"] == "err2issue-fp-v2-abc123def456"
 
 
 async def test_dry_run_emits_through_the_supplied_callback():
@@ -62,7 +62,7 @@ async def test_workflow_sink_dispatches_with_the_documented_inputs():
     assert body["ref"] == "main"
     inputs = body["inputs"]
     assert inputs["fingerprint"] == "abc123def456"
-    assert inputs["fingerprint_version"] == "v1"
+    assert inputs["fingerprint_version"] == "v2"
     assert inputs["service"] == "checkout-api"
     assert inputs["exception_type"] == "TypeError"
     assert inputs["title"] == "[x1] A title"
