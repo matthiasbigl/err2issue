@@ -41,6 +41,10 @@ class Sink(ABC):
     async def aclose(self) -> None:
         return None
 
+    def health(self) -> dict:
+        """Sink-specific operational state, surfaced on /stats and /metrics."""
+        return {}
+
 
 class GitHubSink(Sink):
     name = "github"
@@ -50,6 +54,9 @@ class GitHubSink(Sink):
 
     async def deliver(self, event, fingerprint, repo, summary, correlated=None) -> FiledIssue:
         return await self.filer.file(event, fingerprint, repo, summary, correlated)
+
+    def health(self) -> dict:
+        return self.filer.health()
 
     async def aclose(self) -> None:
         await self.filer.client.aclose()
@@ -163,5 +170,6 @@ def build_sink(settings, client: GitHubClient | None) -> Sink:
             max_message_chars=settings.max_message_chars,
             max_stacktrace_chars=settings.max_stacktrace_chars,
             max_log_lines=settings.max_context_log_lines,
+            unavailable_cooldown_seconds=settings.repo_unavailable_cooldown_seconds,
         )
     )

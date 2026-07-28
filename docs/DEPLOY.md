@@ -238,8 +238,11 @@ shared with the web UI. The defaults sit well under both.
 | `err2issue_filed_total{action=…}` | `created` / `commented` / `reopened` / `skipped` |
 | `err2issue_failed_total` | **Non-zero means filing is failing** — check credentials and permissions |
 | `err2issue_dropped_backpressure_total` | Sustained non-zero means GitHub is too slow for your volume |
+| `err2issue_repos_unavailable` | **Non-zero means a repository is dropping every error routed to it** — Issues disabled, or the repo is gone. `/readyz` stays green: the failure is per-repo and a restart does not fix it. |
+| `err2issue_repo_unavailable_total` | Climbing means the cooldown keeps lapsing onto a repo that is still refusing issues |
 
-`/stats` is the same data plus routing and suppression state, for humans.
+`/stats` is the same data plus routing, suppression, and per-repository
+availability state, for humans.
 
 ## Troubleshooting
 

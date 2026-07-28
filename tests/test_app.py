@@ -202,6 +202,12 @@ def test_stats_exposes_routing_and_suppression_state(client):
     assert "suppression" in payload
 
 
+def test_stats_exposes_sink_health(client):
+    """A repository dropping every error routed to it is otherwise invisible:
+    /readyz stays green and the log line is hours old."""
+    assert client.get("/stats").json()["sink_health"] == {}, "dry-run has no repo state"
+
+
 # -- fail fast -------------------------------------------------------------
 
 

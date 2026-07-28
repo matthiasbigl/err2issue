@@ -176,6 +176,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         service: Service = request.app.state.service
         content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
         encoding = (request.headers.get("content-encoding") or "").strip().lower()
+
         body = await request.body()
 
         try:
@@ -250,6 +251,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "# TYPE err2issue_dropped_backpressure_total counter\n"
             f"err2issue_dropped_backpressure_total {service.dropped_backpressure}\n"
         )
+        # A repository going unavailable drops every error routed to it while
+        # /readyz stays green — deliberately, since the failure is per-repo and
+        # restarting the pod does not fix it. These are the only signals that
+        # say it is happening, so they are worth alerting on.
+        health = service.pipeline.sink.health()
+        if "unavailable_repos" in health:
+            text += (
+                "# HELP err2issue_repos_unavailable Repositories currently in "
+                "the unavailable cooldown, dropping their errors.\n"
+                "# TYPE err2issue_repos_unavailable gauge\n"
+                f"err2issue_repos_unavailable {len(health['unavailable_repos'])}\n"
+                "# HELP err2issue_repo_unavailable_total Times a repository was "
+                "marked unavailable.\n"
+                "# TYPE err2issue_repo_unavailable_total counter\n"
+                f"err2issue_repo_unavailable_total {health['unavailable_events']}\n"
+            )
         return Response(content=text, media_type="text/plain; version=0.0.4")
 
     @app.get("/stats")
@@ -268,6 +285,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "suppression": service.pipeline.suppressor.stats(),
             "traces_buffered": len(service.pipeline.traces),
             "metrics": service.pipeline.metrics.as_dict(),
+            "sink_health": service.pipeline.sink.health(),
         }
 
     return app
