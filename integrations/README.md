@@ -1,7 +1,7 @@
 # Consumers: turning an issue into a fix
 
-err2issue ends at the issue. That is deliberate — [PLAN.md](../PLAN.md) §3 makes
-"no automated fixing" a non-goal, and the reason it holds up is that **the issue
+err2issue ends at the issue. That is deliberate — "no automated fixing" is a
+non-goal, and the reason it holds up is that **the issue
 is the API**. Anything that can read a GitHub issue can consume err2issue output,
 with no coupling to the receiver, no shared database, and no plugin interface.
 

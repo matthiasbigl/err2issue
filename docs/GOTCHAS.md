@@ -17,7 +17,6 @@ Referenced from [AGENTS.md](../AGENTS.md), which is the file to read first.
   30 req/min, 1,000-result cap, and it sets `incomplete_results` because it is
   *allowed to return partial results*. It reports "no issue" for one created
   seconds ago. Always `GET /repos/{o}/{r}/issues?labels=…&state=all`.
-  ([CHALLENGE.md §1](../CHALLENGE.md))
 - **Issues endpoints return pull requests too.** "Every pull request is an
   issue." Filter anything carrying a `pull_request` key or you will match a PR
   as if it were the error's issue.
