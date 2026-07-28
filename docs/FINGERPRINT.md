@@ -174,7 +174,7 @@ GitHub caps label names at 50 characters. `err2issue-fp-` (13) + `v2-` (3) + 12
 This label is the **deduplication key** and the reason dedup is correct: it is
 looked up with `GET /repos/{o}/{r}/issues?labels=<label>&state=all`, a strongly
 consistent read of the issues table, rather than the eventually-consistent
-search index (see [CHALLENGE.md](../CHALLENGE.md) §1).
+search index.
 
 > **Never remove an `err2issue-fp-*` label from an issue** — of any version.
 > err2issue will not find the issue and will file a duplicate on the next

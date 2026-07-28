@@ -10,7 +10,6 @@ This file stays short on purpose. The detail lives one link away:
 | Changing identity rules | [docs/FINGERPRINT.md](docs/FINGERPRINT.md) — a versioned contract |
 | Changing the issue body or title | [docs/ISSUE_CONTRACT.md](docs/ISSUE_CONTRACT.md) — a versioned contract |
 | Adding or editing a diagram | [docs/diagrams/README.md](docs/diagrams/README.md) |
-| Wondering why, not what | [CHALLENGE.md](CHALLENGE.md) — the design review that changed the architecture before implementation |
 
 **Both files are living logs.** Learn something non-obvious → add it to
 GOTCHAS.md. Settle a question that should stay settled → add it to
@@ -192,10 +191,10 @@ Recorded so nobody re-opens them without new information.
 
 | Decision | Why | Where |
 |---|---|---|
-| File via REST, not `workflow_dispatch` | 204-no-body means no feedback; needs a file on every repo's default branch; input caps strain large stack traces | [CHALLENGE.md §2](CHALLENGE.md) |
-| Label creation as the mutex | Atomic create-or-422 arbitrated by GitHub; no coordination service, no owned state | [CHALLENGE.md §4](CHALLENGE.md) |
+| File via REST, not `workflow_dispatch` | 204-no-body means no feedback; needs a file on every repo's default branch; input caps strain large stack traces | — |
+| Label creation as the mutex | Atomic create-or-422 arbitrated by GitHub; no coordination service, no owned state | — |
 | Fingerprint version in the label | A rules change otherwise orphans every existing issue silently | [docs/FINGERPRINT.md](docs/FINGERPRINT.md) |
-| Redaction on by default | The destination is public-by-default and permanently archived — categorically different from a telemetry backend | [CHALLENGE.md §7](CHALLENGE.md) |
+| Redaction on by default | The destination is public-by-default and permanently archived — categorically different from a telemetry backend | — |
 | Filing is off the request path | Three GitHub round-trips plus an LLM call would exceed the collector's export timeout and trigger retries | `app.py` |
 | Two path segments in normalization | One merges `app/handler.py` with `worker/handler.py`; the full path splits the same bug per build machine | [docs/FINGERPRINT.md](docs/FINGERPRINT.md) |
 | AI is never a dependency | Preserved verbatim from PLAN.md §5.3; every failure path returns the deterministic title | `ai.py` |

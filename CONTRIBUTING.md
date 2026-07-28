@@ -166,9 +166,8 @@ worked example. Use GitHub's private vulnerability reporting.
 
 ## Scope
 
-err2issue is a pipe, not a platform. Deliberate non-goals, from
-[PLAN.md](PLAN.md) §3: no UI, no metrics pipeline, no query API, no automated
-fixing.
+err2issue is a pipe, not a platform. Deliberate non-goals: no UI, no metrics
+pipeline, no query API, no automated fixing.
 
 Fix agents are *consumers* — they read the issue contract from outside. If you
 want err2issue to fix bugs, the answer is

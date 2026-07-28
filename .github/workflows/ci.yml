@@ -58,6 +58,12 @@ jobs:
     # `edited` is in the trigger list solely for conventional-commits.
     if: github.event.action != 'edited'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Push to GHCR on main. GITHUB_TOKEN is scoped to this run and this repo;
+      # PRs (including forks) get the default read-only token and never reach
+      # the push step because of the `if` below.
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -108,6 +114,32 @@ jobs:
       - name: Container logs on failure
         if: failure()
         run: docker logs e2i || true
+
+      # Publish only after the smoke test passed, and only from main: the image
+      # that ships is the image that was verified. `:latest` is what the
+      # README/docker-compose/K8s examples reference; the immutable sha tag is
+      # for pinning and rollbacks. This is a rebuild, not a re-tag of the
+      # smoke-tested image — the gha cache makes it a no-op layer-wise, and it
+      # keeps `load: true` (single-platform local image) and the registry push
+      # as separate, independently understandable steps.
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          cache-from: type=gha
 
   workflow-syntax:
     # A title-only edit cannot change the code, so skip the expensive jobs;

@@ -1,7 +1,7 @@
 # The issue contract
 
-This is the product. [PLAN.md](../PLAN.md) §6 calls the issue format "the
-loose-coupling seam", and that is exactly right: err2issue has no API, no
+This is the product. The issue format is the loose-coupling seam: err2issue
+has no API, no
 database, and no plugin interface. It writes issues in a fixed format, and
 anything that can read a GitHub issue is a consumer.
 
@@ -192,7 +192,6 @@ exist. If you write one:
 4. **Look the issue up with `GET /repos/{o}/{r}/issues?labels=…&state=all`**,
    never `GET /search/issues`. The search index is eventually consistent, so it
    will tell you no issue exists when one does, and you will file a duplicate.
-   See [CHALLENGE.md](../CHALLENGE.md) §1.
 5. Redact before writing. Issues are public-by-default and permanently archived.
 
 ## Full example
