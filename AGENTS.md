@@ -158,6 +158,14 @@ Things that have already cost someone time.
   shared with the web UI.
 - `workflow_dispatch` returns **204 with no body** — no run id, no issue number.
   Anything downstream of it is unobservable.
+- **Push protection blocks realistic secret fixtures.** A test token has to look
+  exactly like the real thing to be worth testing, which is precisely what the
+  scanner rejects — `GH013`, push declined, on a file that contains no real
+  credential. Build every fixture in `tests/test_redact.py` from concatenated
+  fragments (`"xoxb-" + "1" * 12 + …`): the scanner reads the file text, not the
+  evaluated Python. Do not resolve this by clicking the "allow this secret"
+  unblock URL — that whitelists the string repository-wide. `AKIAIOSFODNN7EXAMPLE`
+  is safe as a literal; it is AWS's published documentation key.
 
 ### OTLP
 

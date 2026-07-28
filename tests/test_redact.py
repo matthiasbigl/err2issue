@@ -12,6 +12,12 @@ import pytest
 from err2issue.redact import MASK, Redactor
 from tests.conftest import PY_TRACE, make_event
 
+# Every fixture is assembled from fragments rather than written as one literal.
+# These have to look exactly like the real thing for the patterns to be worth
+# testing, which means a contiguous literal would trip GitHub's push protection
+# and block the commit — the scanner reads the file, not the evaluated Python.
+# `AKIAIOSFODNN7EXAMPLE` is the exception: it is AWS's published documentation
+# key and is allowlisted by the scanner precisely so tests can use it.
 SECRETS = [
     ("github classic PAT", "ghp_" + "A" * 36),
     ("github App token", "ghs_" + "B" * 36),
