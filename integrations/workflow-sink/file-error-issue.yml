@@ -1,0 +1,160 @@
+# file-error-issue.yml — the reusable issue-filing mechanism
+#
+# Copy this into `.github/workflows/` of a repository that should receive
+# err2issue reports, then run err2issue with E2I_SINK=workflow.
+#
+# WHEN YOU WANT THIS
+#   PLAN.md §5.2 makes a good argument that is worth preserving: if filing goes
+#   through workflow_dispatch, then *anything* that can call that endpoint can
+#   file a well-formed issue — a failing CI job, a security scan, a human with
+#   `gh workflow run`. This file is that mechanism.
+#
+# WHEN YOU DO NOT
+#   As err2issue's default output it costs more than it returns. workflow_dispatch
+#   returns 204 with no body, so the service cannot tell whether the issue was
+#   filed; the file must live on the default branch of every adopting repo; and
+#   inputs are capped at 10 keys with size limits, which large stack traces
+#   strain. See CHALLENGE.md §2. E2I_SINK=github is the default for these reasons.
+#
+# DEDUPLICATION
+#   This workflow reads `gh issue list --label`, NOT `gh issue search`. The
+#   search index is eventually consistent and would report "no issue" for one
+#   created seconds ago, producing duplicates. See CHALLENGE.md §1.
+
+name: file-error-issue
+
+on:
+  workflow_dispatch:
+    inputs:
+      fingerprint:
+        description: "12-character error fingerprint"
+        required: true
+        type: string
+      fingerprint_version:
+        description: "Fingerprint rule version (e.g. v1)"
+        required: false
+        default: v1
+        type: string
+      title:
+        description: "Issue title, without the [xN] prefix"
+        required: true
+        type: string
+      context:
+        description: "Issue body (markdown), including the machine header"
+        required: true
+        type: string
+      service:
+        description: "service.name that produced the error"
+        required: false
+        type: string
+      exception_type:
+        description: "Exception class name"
+        required: false
+        type: string
+      occurred_at:
+        description: "ISO 8601 timestamp of this occurrence"
+        required: false
+        type: string
+      dry_run:
+        description: "Print what would happen without writing anything"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  issues: write        # the only permission this needs
+
+# Serialise filings of the SAME error so two dispatches cannot both create.
+concurrency:
+  group: err2issue-${{ inputs.fingerprint }}
+  cancel-in-progress: false
+
+jobs:
+  file:
+    runs-on: ubuntu-latest
+    steps:
+      - name: File or update the issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          # Every input is attacker-influenced production data. Passing them
+          # through the environment rather than ${{ }} interpolation into the
+          # script keeps them out of the shell's parse.
+          FINGERPRINT: ${{ inputs.fingerprint }}
+          FP_VERSION: ${{ inputs.fingerprint_version }}
+          TITLE: ${{ inputs.title }}
+          CONTEXT: ${{ inputs.context }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          case "$FINGERPRINT" in
+            *[!0-9a-f]* | "") echo "::error::fingerprint must be lowercase hex"; exit 1 ;;
+          esac
+          case "$FP_VERSION" in
+            v[0-9]*) ;;
+            *) echo "::error::fingerprint_version must look like v1"; exit 1 ;;
+          esac
+
+          LABEL="err2issue-fp-${FP_VERSION}-${FINGERPRINT}"
+          echo "label: $LABEL"
+
+          # Consistent lookup: the issues table, not the search index.
+          existing="$(gh issue list --repo "$REPO" --label "$LABEL" --state all \
+                        --limit 5 --json number,title,state 2>/dev/null || echo '[]')"
+          number="$(printf '%s' "$existing" | jq -r 'sort_by(.state == "open") | last | .number // empty')"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            if [ -n "$number" ]; then
+              echo "DRY RUN: would add an occurrence to #${number}"
+            else
+              echo "DRY RUN: would create an issue titled [x1] ${TITLE}"
+            fi
+            exit 0
+          fi
+
+          if [ -z "$number" ]; then
+            gh label create "err2issue" --repo "$REPO" --color 'B60205' \
+              --description 'Filed by err2issue' 2>/dev/null || true
+            # 422 already_exists is the losing side of the creation race, not an
+            # error — another dispatch got there first.
+            gh label create "$LABEL" --repo "$REPO" --color 'B60205' \
+              --description "err2issue fingerprint ${FP_VERSION}:${FINGERPRINT}" 2>/dev/null || true
+
+            # Re-check after claiming: a concurrent run may have created it.
+            existing="$(gh issue list --repo "$REPO" --label "$LABEL" --state all \
+                          --limit 5 --json number,state 2>/dev/null || echo '[]')"
+            number="$(printf '%s' "$existing" | jq -r 'sort_by(.state == "open") | last | .number // empty')"
+          fi
+
+          if [ -z "$number" ]; then
+            printf '%s' "$CONTEXT" > /tmp/body.md
+            url="$(gh issue create --repo "$REPO" \
+              --title "[x1] ${TITLE}" --body-file /tmp/body.md \
+              --label "err2issue" --label "$LABEL")"
+            echo "created: $url"
+            exit 0
+          fi
+
+          # Existing issue: bump the count, reopen if it was closed.
+          current="$(gh issue view "$number" --repo "$REPO" --json title,state)"
+          old_title="$(printf '%s' "$current" | jq -r .title)"
+          state="$(printf '%s' "$current" | jq -r .state)"
+
+          count="$(printf '%s' "$old_title" | sed -n 's/^\[x\([0-9]\{1,\}\)\].*/\1/p')"
+          count="${count:-1}"
+          stem="$(printf '%s' "$old_title" | sed 's/^\[x[0-9]\{1,\}\] *//')"
+          next=$((count + 1))
+
+          gh issue edit "$number" --repo "$REPO" --title "[x${next}] ${stem}"
+
+          if [ "$state" = "CLOSED" ]; then
+            gh issue reopen "$number" --repo "$REPO"
+            printf '### Regression\n\nThis error returned after the issue was closed.\n\n%s\n' \
+              "$CONTEXT" > /tmp/comment.md
+          else
+            printf '### Occurrence #%s\n\n%s\n' "$next" "$CONTEXT" > /tmp/comment.md
+          fi
+
+          gh issue comment "$number" --repo "$REPO" --body-file /tmp/comment.md
+          echo "updated: #${number} -> [x${next}]"
