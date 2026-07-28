@@ -159,31 +159,6 @@ agent can set it up correctly.
 **Start with triage.** It only comments, costs little, and shows whether the
 context is rich enough on your codebase before you let anything write code.
 
-## Design
-
-This repository began as a design document. Before implementing it, the design
-was reviewed and several parts were found wanting — most seriously, the original
-dedup mechanism could not deliver the "exactly one issue" guarantee it promised.
-
-- **[PLAN.md](PLAN.md)** — the original design
-- **[CHALLENGE.md](CHALLENGE.md)** — what was wrong with it and what changed
-
-The three changes worth knowing:
-
-**Dedup reads the issues table, not the search index.** `GET /repos/{o}/{r}/issues?labels=…&state=all`
-is strongly consistent. `GET /search/issues` is an eventually-consistent index,
-rate-limited to 30/min, capped at 1,000 results, and explicitly allowed to return
-partial results — so it reports "no issue exists" for one created seconds ago,
-and a crash loop produces duplicates.
-
-**Label creation is the distributed mutex.** `POST /labels` returns 201 to
-exactly one caller and 422 to everyone else, arbitrated by GitHub's own database.
-Two replicas, one issue — no coordination service, no owned state.
-
-**Redaction is on by default.** Everywhere else in a telemetry stack an
-unredacted secret lands behind SSO with a retention limit. Here it lands in a
-GitHub issue: indexed, emailed to watchers, and permanently public on a public
-repo. Inheriting the upstream posture unchanged is not a neutral choice.
 
 ## Deployment
 
