@@ -177,7 +177,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
         encoding = (request.headers.get("content-encoding") or "").strip().lower()
 
-        body = await request.body()
+        try:
+            body = await _read_body(request)
+        except _BodyTooLarge as exc:
+            return _error(413, str(exc), content_type)
 
         try:
             body = _decompress(body, encoding)
@@ -299,6 +302,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 # default-configured collector fails to parse and 400s. Found by running a real
 # collector against the service, not by reading the spec.
 _MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
+
+
+class _BodyTooLarge(Exception):
+    """The request body exceeded the ingest ceiling before it was even decoded."""
+
+
+async def _read_body(request: Request) -> bytes:
+    """Read the body, refusing anything past the post-decompression ceiling.
+
+    `await request.body()` buffers the whole request with no bound, so an
+    uncompressed payload was limited only by the container's memory limit —
+    while a *compressed* one was capped at 64MB by `_bounded`. The uncompressed
+    path is the easier one to send, so it needs the same ceiling. Streaming
+    means an oversized body is refused partway through rather than after it has
+    all been buffered.
+    """
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > _MAX_DECOMPRESSED_BYTES:
+        raise _BodyTooLarge(
+            f"body of {declared} bytes exceeds {_MAX_DECOMPRESSED_BYTES}; refusing to read"
+        )
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > _MAX_DECOMPRESSED_BYTES:
+            raise _BodyTooLarge(f"body exceeds {_MAX_DECOMPRESSED_BYTES} bytes; refusing to read")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _decompress(body: bytes, encoding: str) -> bytes:
