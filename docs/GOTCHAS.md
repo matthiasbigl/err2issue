@@ -143,6 +143,38 @@ Referenced from [AGENTS.md](../AGENTS.md), which is the file to read first.
 - `scripts/check_docs.py` enforces all of the above, plus that every relative
   link resolves. CI then renders each block with `mermaid-cli`.
 
+### GitHub Agentic Workflows (gh-aw)
+
+Only relevant when changing `integrations/gh-aw/`. All of these were confirmed
+against gh-aw v0.83.4 by compiling, not by reading documentation.
+
+- **`gh aw compile` is a validator, so use it as one.** Unknown frontmatter
+  keys, wrong value types, and correct keys at the wrong nesting level all fail
+  the build — `roles:` at the top level is an error, `on.roles:` is fine. CI
+  compiles the shipped workflow on every run. Probe a question with the compiler
+  rather than reasoning about the schema.
+- **Its warnings are run-time errors in disguise.** `toolsets: [default]`
+  includes the `pull_requests` toolset, which needs `pull-requests: read`.
+  Without it the workflow compiles with a *warning* and then fails when someone
+  runs it. The CI gate treats any warning as a failure.
+- **Grepping that build log for "warning" fails every build.** The success line
+  is `0 error(s), 0 warning(s)` — it contains both words. Assert that exact
+  summary instead. This gate shipped broken for exactly one commit.
+- **A pull request opened with `GITHUB_TOKEN` does not start CI.** GitHub blocks
+  it to prevent workflow recursion, so an agent's PR arrives with no checks —
+  the PR you least want unverified. The fix is a `GH_AW_CI_TRIGGER_TOKEN` secret
+  (fine-grained PAT, Contents: Read & Write) which gh-aw picks up by name and
+  uses to push one empty commit.
+- **"No PAT needed" is about inference only.** Since June 2026,
+  `permissions: copilot-requests: write` bills Copilot through the built-in
+  token — but only where the org has "Allow use of Copilot CLI billed to the
+  organization" enabled. Elsewhere it silently falls back to needing a
+  `COPILOT_GITHUB_TOKEN` PAT. Two different tokens, two different problems.
+- **A GitHub App cannot authenticate Copilot inference.** Apps cover repository
+  access. Model access is `copilot-requests: write` or a PAT, and nothing else.
+- **Network ecosystem identifiers are a closed set.** `npm`, `pip` and `cargo`
+  are compile errors; the identifiers are `node`, `python`, `rust`, and so on.
+
 ### Everything else
 
 - **`ruff format` is enforced in CI.** Run it before pushing; it reflows a

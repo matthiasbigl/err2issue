@@ -25,7 +25,7 @@ flowchart LR
 |---|---|---|
 | Format | Standard GitHub Actions YAML | Markdown compiled to YAML by `gh aw compile` |
 | Agent | Claude Code | Copilot by default; Claude or Codex selectable |
-| Secret needed | `ANTHROPIC_API_KEY` | none for Copilot on GitHub-hosted runners |
+| Secret needed | `ANTHROPIC_API_KEY` | none, if your org allows Copilot CLI billed to the organisation ([details](gh-aw/README.md#which-agent-and-what-it-costs-you-to-authenticate)) |
 | Writes | The agent commits and opens PRs directly | Only through declared `safe-outputs` |
 | Best when | You already use Claude Code and want full control | You want the framework to bound what the agent can do |
 

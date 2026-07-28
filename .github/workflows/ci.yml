@@ -149,6 +149,42 @@ jobs:
           sys.exit(1 if failed else 0)
           EOF
 
+  gh-aw-compile:
+    # A title-only edit cannot change the code, so skip the expensive jobs;
+    # `edited` is in the trigger list solely for conventional-commits.
+    if: github.event.action != 'edited'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile the shipped agentic workflow
+        run: |
+          set -euo pipefail
+          # gh-aw's compiler is a real validator: unknown frontmatter keys,
+          # wrong value types and keys at the wrong nesting level all fail it,
+          # and missing toolset permissions come back as warnings. We ship this
+          # workflow for other people to install, so it has to survive both.
+          curl -sL https://raw.githubusercontent.com/github/gh-aw/main/install-gh-aw.sh | bash
+          AW="$HOME/.local/share/gh/extensions/gh-aw/gh-aw"
+          "$AW" version
+
+          work="$RUNNER_TEMP/aw"
+          mkdir -p "$work/.github/workflows"
+          cp integrations/gh-aw/workflows/*.md "$work/.github/workflows/"
+          cd "$work"
+          git init -q .
+
+          # A hard error already fails the step via pipefail. Warnings do not,
+          # and they matter: a missing toolset permission compiles cleanly and
+          # then fails at run time for whoever installed it. So assert the
+          # summary line exactly rather than grepping for the word "warning" —
+          # the success line is "0 error(s), 0 warning(s)" and contains both.
+          "$AW" compile 2>&1 | tee compile.log
+          if ! grep -qE '0 error\(s\), 0 warning\(s\)' compile.log; then
+            echo "::error::gh aw compile did not finish clean — see the log above"
+            exit 1
+          fi
+
   docs:
     # A title-only edit cannot change the code, so skip the expensive jobs;
     # `edited` is in the trigger list solely for conventional-commits.
