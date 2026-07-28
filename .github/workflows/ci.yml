@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `edited` is not in the default set (opened, synchronize, reopened), and
+    # without it the conventional-commits job never re-runs when someone changes
+    # the PR title — a title fixed after review stays red, and a valid one edited
+    # into an invalid one stays green. The title is the squash-merge subject, so
+    # it has to be re-checked whenever it changes.
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
 
 permissions:
@@ -15,6 +21,9 @@ concurrency:
 
 jobs:
   lint-and-test:
+    # A title-only edit cannot change the code, so skip the expensive jobs;
+    # `edited` is in the trigger list solely for conventional-commits.
+    if: github.event.action != 'edited'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -45,6 +54,9 @@ jobs:
         run: uv run pytest -q --cov=err2issue --cov-report=term-missing --cov-fail-under=85
 
   docker:
+    # A title-only edit cannot change the code, so skip the expensive jobs;
+    # `edited` is in the trigger list solely for conventional-commits.
+    if: github.event.action != 'edited'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -98,6 +110,9 @@ jobs:
         run: docker logs e2i || true
 
   workflow-syntax:
+    # A title-only edit cannot change the code, so skip the expensive jobs;
+    # `edited` is in the trigger list solely for conventional-commits.
+    if: github.event.action != 'edited'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

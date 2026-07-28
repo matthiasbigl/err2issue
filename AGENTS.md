@@ -231,6 +231,13 @@ Things that have already cost someone time.
 - `pyproject.toml` uses `license = "Apache-2.0"` as a string. The
   `{ text = ... }` table form is deprecated and fails the build on modern
   setuptools.
+- **A bare `pull_request:` trigger does not fire on `edited`.** The default set
+  is `opened, synchronize, reopened`, so a PR-title check never re-runs when the
+  title changes: a title fixed after review stays red, and a valid one edited
+  into garbage stays green. `ci.yml` lists the types explicitly and guards the
+  three expensive jobs with `if: github.event.action != 'edited'` so a
+  description edit does not rebuild the image. Note `github.event.action` is
+  empty on `push` and `workflow_dispatch`, so the guard is a no-op there.
 
 ---
 
