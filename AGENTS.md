@@ -149,8 +149,12 @@ Things that have already cost someone time.
   as if it were the error's issue.
 - **`POST /labels` returning 422 is success, not failure.** It is the losing
   side of the creation mutex. `create_label()` returns a bool for this reason.
-- **Label names cap at 50 characters.** `err2issue-fp-v1-<12 hex>` is 28. Do not
+- **Label names cap at 50 characters.** `err2issue-fp-v2-<12 hex>` is 28. Do not
   lengthen the prefix without checking.
+- **A 410 marks a repo unavailable, and that mark must expire.** Issues-disabled
+  is a setting someone turns back on; remembering it until restart is silent
+  data loss on a Ready pod. `IssueFiler` re-probes on a cooldown — do not
+  "simplify" it back to a permanent set.
 - **A plain 403 is not a rate limit.** Only treat 403 as retryable when
   `x-ratelimit-remaining: 0` or the body mentions a rate limit; otherwise it is
   a permissions failure and retrying just burns quota.
@@ -176,6 +180,10 @@ Things that have already cost someone time.
   by running a real collector against the service; the unit tests all passed.
   Handled in `app.py:_decompress` (gzip, deflate, raw deflate, identity) with a
   64 MiB ceiling against decompression bombs.
+- **`await request.body()` has no ceiling**, so bounding only the decompressed
+  payload leaves the easier attack unbounded. Read through `app.py:_read_body`,
+  which streams to the same cap; `Content-Length` alone is not enough, a chunked
+  request declares no length.
 - **Collectors send protobuf *or* JSON** depending on the exporter's `encoding`.
   Supporting one is a silent deployment trap: the receiver 415s and the
   collector retries forever.
@@ -199,6 +207,14 @@ Things that have already cost someone time.
 - Errors with **no stack trace are normal** (Go, JS across a bundler boundary,
   severity-only records). The fingerprint has a documented message fallback.
 
+### Redaction
+
+- **Replace spans, not text.** A rule that keeps part of its match needs a
+  capture-group template (`_TEMPLATES` in `redact.py`), never
+  `m.group(0).replace(m.group(1), MASK, 1)` — that masks the first occurrence of
+  the *string*, which in `postgres:postgres@host` is the username, leaking the
+  password. Equal user and password is the common case, not the edge one.
+
 ### Fingerprinting
 
 - **`\b\d{4,}\b` does not match `3000ms`.** A trailing word boundary fails
@@ -208,8 +224,14 @@ Things that have already cost someone time.
 - **Go prints the function line above the file line**, so the function line is
   what gets selected. That is deliberate — the file line also carries a `+0x1a`
   offset that changes on every recompile.
-- **Never edit the v1 rules in place.** Ship `v2`. An in-place edit
-  re-fingerprints every error in every deployment at once, with no signal.
+- **Python prints its traceback outermost-first**, alone among the ecosystems
+  here, so its error site is the *last* `File "` line. Only `File "` lines are
+  eligible for that scan — a source excerpt like `    total()` matches the
+  Go/C++ symbol pattern and would otherwise win. Rationale and the v1→v2
+  migration: [docs/FINGERPRINT.md](docs/FINGERPRINT.md#v2).
+- **Never edit a released version's rules in place.** Ship the next `vN`. An
+  in-place edit re-fingerprints every error in every deployment at once, with
+  no signal.
 
 ### Anthropic API
 
