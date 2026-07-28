@@ -44,8 +44,13 @@ _BUILTIN: list[tuple[str, str]] = [
     ("basic_auth", r"(?i)\bbasic\s+[A-Za-z0-9+/]{16,}={0,2}"),
     # JWTs (three dot-separated base64url segments, header starts with eyJ)
     ("jwt", r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
-    # Passwords inside connection strings: scheme://user:secret@host
-    ("conn_string_password", r"://[^\s:/@]+:([^\s@/]+)@"),
+    # Passwords inside connection strings: scheme://user:secret@host.
+    # Two groups so the substitution replaces the password *span*. Matching the
+    # password as text and replacing it inside the match would mask the first
+    # occurrence in the whole match — which is the username whenever the two are
+    # equal, leaking the password. `postgres:postgres` and `default:default` are
+    # exactly the shapes that show up in a DSN inside a connection error.
+    ("conn_string_password", r"(://[^\s:/@]+:)([^\s@/]+)@"),
     # PEM private keys — collapse the whole block
     (
         "private_key_block",
@@ -61,6 +66,14 @@ _BUILTIN: list[tuple[str, str]] = [
 ]
 
 _FLAGS = re.DOTALL
+
+# Rules that keep part of what they match. The value is an `re.sub` template, so
+# the replacement is positional — it swaps a span, never a substring looked up by
+# its text. Anything not listed here is replaced wholesale with MASK.
+_TEMPLATES: dict[str, str] = {
+    # Keep the URL shape (scheme, user, host); mask only the password.
+    "conn_string_password": rf"\g<1>{MASK}@",
+}
 
 
 class Redactor:
@@ -91,11 +104,7 @@ class Redactor:
             return text or ""
         out = text
         for name, rule in self._rules:
-            if name == "conn_string_password":
-                # Keep the URL shape; mask only the password group.
-                out = rule.sub(lambda m: m.group(0).replace(m.group(1), MASK, 1), out)
-            else:
-                out = rule.sub(MASK, out)
+            out = rule.sub(_TEMPLATES.get(name, MASK), out)
         return out
 
     def scan(self, text: str) -> list[str]:
