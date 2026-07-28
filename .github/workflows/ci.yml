@@ -45,10 +45,10 @@ jobs:
         run: uv sync --frozen --group dev
 
       - name: Lint
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests scripts
 
       - name: Format check
-        run: uv run ruff format --check src tests
+        run: uv run ruff format --check src tests scripts
 
       - name: Test
         run: uv run pytest -q --cov=err2issue --cov-report=term-missing --cov-fail-under=85
@@ -148,6 +148,40 @@ jobs:
                   print(f"FAIL {path}: {exc}")
           sys.exit(1 if failed else 0)
           EOF
+
+  docs:
+    # A title-only edit cannot change the code, so skip the expensive jobs;
+    # `edited` is in the trigger list solely for conventional-commits.
+    if: github.event.action != 'edited'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check links and Mermaid conventions
+        run: python3 scripts/check_docs.py --emit "$RUNNER_TEMP/mermaid"
+
+      - name: Render every Mermaid diagram
+        run: |
+          set -euo pipefail
+          # A diagram that fails to parse renders as a red error box on GitHub,
+          # in whichever file it lives — usually the README. Actually rendering
+          # each block is the only way to catch that before it ships.
+          npm install --no-fund --no-audit --global @mermaid-js/mermaid-cli@11
+          echo '{"args":["--no-sandbox","--disable-dev-shm-usage"]}' > "$RUNNER_TEMP/puppeteer.json"
+          for block in "$RUNNER_TEMP"/mermaid/*.mmd; do
+            echo "rendering $(basename "$block")"
+            mmdc --input "$block" \
+                 --output "$RUNNER_TEMP/$(basename "$block" .mmd).svg" \
+                 --puppeteerConfigFile "$RUNNER_TEMP/puppeteer.json"
+          done
+
+      - name: Diagrams on failure
+        if: failure()
+        run: cat "$RUNNER_TEMP"/mermaid/*.mmd || true
 
   conventional-commits:
     # Only meaningful on pull requests: the PR title becomes the squash-merge

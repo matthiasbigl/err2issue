@@ -1,18 +1,48 @@
 # err2issue
 
-**OpenTelemetry errors in, deduplicated GitHub issues out.**
+**Meet every production error exactly once.**
 
-Every *unique* production error becomes exactly one GitHub issue — with an
-AI-written title, an occurrence counter in the title (`[x12] …`), and all the
-context a human *or an automated fix agent* needs to act on it.
-
-No database. No dashboard. No new destination to run. **GitHub is the store, the
-UI, and the notification system.**
+OpenTelemetry errors in, deduplicated GitHub issues out.
 
 [![CI](https://github.com/matthiasbigl/err2issue/actions/workflows/ci.yml/badge.svg)](https://github.com/matthiasbigl/err2issue/actions/workflows/ci.yml)
 &nbsp;Python 3.11+ &nbsp;·&nbsp; Apache-2.0 &nbsp;·&nbsp; ~15 MB container
 
 ---
+
+## The idea
+
+Think about the last error you fixed. You almost certainly met it more than
+once: in a dashboard you happened to open, in a Slack thread three weeks later,
+in a bug report from someone who hit it in production while you were reading
+about it in staging. Each of those encounters cost you the same twenty minutes
+of *is this the thing I already looked at?*
+
+That work is pure waste, and it is waste a machine can do. An error has an
+identity — service, exception type, and the frame where it was raised — and two
+errors with the same identity are the same bug no matter how far apart they
+happen. Everything else follows from computing it:
+
+**The first time it happens**, an issue appears in the right repository, titled
+in plain language, carrying the stack trace, the log lines from the same trace
+immediately before the failure, and the runtime attributes. Enough to act on
+without opening a telemetry backend.
+
+**The eight hundredth time**, that same issue says `[x800]`. No new issue, no
+new notification, no thread of duplicates for someone to close by hand. The
+number is the signal, and it is the number you sort by when you decide what to
+fix on Monday.
+
+**If it comes back after you fixed it**, the issue you closed reopens itself.
+That reopen is the most valuable event in the system, because it is the only
+honest answer to *did the fix actually hold?*
+
+**And because the issue is the whole interface**, a fix agent is just another
+reader. Two are [set up and verified here](#closing-the-loop-issue--fix). File
+the issue, and something can already be opening the pull request.
+
+No database. No dashboard. No new destination to run. **GitHub is the store, the
+UI, and the notification system** — one small container between your collector
+and your issue tracker, and your applications never learn it exists.
 
 ## How it works
 
@@ -20,20 +50,20 @@ UI, and the notification system.**
 flowchart LR
     A["your apps"] -->|OTLP| C["OTel Collector"]
     C --> B["your existing backend<br/><i>unchanged</i>"]
-    C -->|"filtered: errors only"| E["err2issue"]
 
     subgraph E2I ["err2issue — one small container"]
         direction TB
         R["redact"] --> F["fingerprint"] --> S["suppress"] --> RT["route"] --> AI["AI title"]
     end
 
-    E --> E2I
-    E2I -->|"REST: create · comment · reopen"| G["GitHub Issue<br/><b>[x12] NullReference in profile-service</b>"]
+    C -->|"filtered:<br/>errors only"| R
+    AI -->|"REST: create · comment · reopen"| G["GitHub Issue<br/><b>[x12] NullReference in profile-service</b>"]
     G -.->|"the issue is the API"| X["fix agent · triage · dashboards"]
 ```
 
-Your applications never learn err2issue exists. Adding it is a **collector-config
-change only**, and removing it is a one-line revert.
+Adding it is a **collector-config change only** — a filter processor and an
+exporter, on a pipeline of their own so it cannot affect what reaches your
+existing backend. Removing it is a one-line revert.
 
 ## The pipeline, in order
 
@@ -41,17 +71,17 @@ change only**, and removing it is a one-line revert.
 flowchart TD
     IN["POST /v1/logs<br/>protobuf or JSON"] --> DEC["decode"]
     DEC --> SEL{"severity ≥ ERROR<br/>or exception.type?"}
-    SEL -->|no| BUF["→ trace ring buffer<br/>(context for later errors)"]
+    SEL -->|no| BUF["trace ring buffer<br/><i>context for later errors</i>"]
     SEL -->|yes| RED["redact secrets"]
     RED --> FP["fingerprint<br/>sha256(service + type + normalized frame)"]
     FP --> SUP{"suppressed?"}
-    SUP -->|"window · rate cap · daily budget"| DROP["drop + count"]
+    SUP -->|yes| DROP["drop + count<br/><i>window · rate cap · daily budget</i>"]
     SUP -->|no| ROUTE["route: service.name → owner/repo"]
     ROUTE --> ENR["AI title<br/><i>falls back deterministically</i>"]
     ENR --> LOOK{"issue with this<br/>fingerprint label?"}
-    LOOK -->|"open"| CMT["bump [xN] + comment"]
-    LOOK -->|"closed"| REO["reopen — regression"]
-    LOOK -->|"none"| NEW["claim label → create issue"]
+    LOOK -->|open| CMT["bump [xN] + comment"]
+    LOOK -->|closed| REO["reopen — regression"]
+    LOOK -->|none| NEW["claim label → create issue"]
 ```
 
 Ordering is deliberate. Redaction runs before fingerprinting, so a leaked token
@@ -104,11 +134,13 @@ telemetry it would silently drop.
 - **The log lines from the same trace, immediately before the failure**
 - Runtime attributes — route, status code, environment
 
-Enough to act on without opening your telemetry backend. That is the design
-goal, and it is what makes the output useful to an agent as well as a person.
+The correlated log lines are the part people do not expect and end up relying
+on: err2issue keeps a ring buffer of records by trace id, so when an error
+arrives it can attach what the same request was doing in the seconds before it
+failed. That is usually the difference between a stack trace and an explanation.
 
-The format is a contract, not a rendering detail:
-[docs/ISSUE_CONTRACT.md](docs/ISSUE_CONTRACT.md).
+The format is a contract, not a rendering detail — which is what lets anything
+read it: [docs/ISSUE_CONTRACT.md](docs/ISSUE_CONTRACT.md).
 
 ## Closing the loop: issue → fix
 
@@ -177,9 +209,10 @@ See [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ```bash
 uv sync --group dev
-uv run pytest                      # 270 tests
-uv run ruff check src tests
-uv run ruff format src tests
+uv run pytest                        # full suite, ~6s
+uv run ruff check src tests scripts
+uv run ruff format src tests scripts
+uv run python scripts/check_docs.py  # links + Mermaid conventions
 ```
 
 Nothing in the suite touches the network: `respx` intercepts every GitHub call

@@ -18,7 +18,7 @@ Fixes #<!-- issue number -->
 - **Service:**
 - **Exception:**
 - **Occurrences:** `[xN]`
-- **Fingerprint:** `v1:`
+- **Fingerprint:** `v2:`
 
 ## Root cause
 
