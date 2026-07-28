@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# uv / venv
+.venv/
+venv/
+
+# Test + lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Secrets and local config — .env.example is the tracked template
+.env
+.env.local
+*.pem
+!docs/**/*.pem
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

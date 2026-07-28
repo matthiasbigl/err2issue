@@ -1,0 +1,54 @@
+# A complete local pipeline: app -> collector -> err2issue -> GitHub.
+#
+#   cp .env.example .env      # add E2I_GITHUB_TOKEN + E2I_GITHUB_REPO
+#   docker compose up --build
+#   ./examples/send-sample-error.sh
+#
+# To try it without touching GitHub, set E2I_SINK=dry-run in .env — err2issue
+# will log every issue it would have filed.
+
+services:
+  err2issue:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: err2issue:local
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      E2I_HOST: "0.0.0.0"
+      E2I_PORT: "4318"
+    ports:
+      # Exposed so you can curl /v1/logs and /stats directly while developing.
+      # In production only the collector needs to reach it — drop this mapping
+      # and keep err2issue on the internal network.
+      - "4318:4318"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          sys.exit(0 if urllib.request.urlopen(
+              "http://127.0.0.1:4318/healthz", timeout=2).status == 200 else 1)
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    cap_drop: ["ALL"]
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.140.0
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./examples/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP/gRPC — point your application here
+      - "14318:4318"  # OTLP/HTTP — mapped off 4318 to avoid clashing with err2issue
+    depends_on:
+      err2issue:
+        condition: service_healthy

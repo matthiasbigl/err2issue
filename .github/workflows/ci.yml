@@ -1,0 +1,184 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # `edited` is not in the default set (opened, synchronize, reopened), and
+    # without it the conventional-commits job never re-runs when someone changes
+    # the PR title — a title fixed after review stays red, and a valid one edited
+    # into an invalid one stays green. The title is the squash-merge subject, so
+    # it has to be re-checked whenever it changes.
+    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    # A title-only edit cannot change the code, so skip the expensive jobs;
+    # `edited` is in the trigger list solely for conventional-commits.
+    if: github.event.action != 'edited'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Format check
+        run: uv run ruff format --check src tests
+
+      - name: Test
+        run: uv run pytest -q --cov=err2issue --cov-report=term-missing --cov-fail-under=85
+
+  docker:
+    # A title-only edit cannot change the code, so skip the expensive jobs;
+    # `edited` is in the trigger list solely for conventional-commits.
+    if: github.event.action != 'edited'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: err2issue:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the image
+        run: |
+          set -euo pipefail
+          docker run -d --name e2i \
+            -p 4318:4318 \
+            -e E2I_SINK=dry-run \
+            -e E2I_GITHUB_REPO=acme/api \
+            -e E2I_AI_ENABLED=false \
+            err2issue:ci
+
+          # Wait for readiness rather than sleeping a fixed amount.
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:4318/healthz > /dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          curl -fsS http://localhost:4318/healthz | grep -q '"ok"'
+          curl -fsS http://localhost:4318/readyz  | grep -q '"ready": true'
+
+          # Push a real OTLP error through and assert it was processed.
+          ./examples/send-sample-error.sh http://localhost:4318 > /dev/null
+          sleep 2
+          curl -fsS http://localhost:4318/stats \
+            | python3 -c 'import json,sys; assert json.load(sys.stdin)["metrics"]["error_events"] == 1, "error was not ingested"'
+
+          # The container must not be running as root.
+          test "$(docker exec e2i id -u)" != "0"
+
+          echo "image smoke test passed"
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs e2i || true
+
+  workflow-syntax:
+    # A title-only edit cannot change the code, so skip the expensive jobs;
+    # `edited` is in the trigger list solely for conventional-commits.
+    if: github.event.action != 'edited'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate shipped YAML
+        run: |
+          python3 - <<'EOF'
+          import pathlib, sys, yaml
+          failed = []
+          targets = [
+              *pathlib.Path(".github/workflows").glob("*.yml"),
+              *pathlib.Path("integrations").rglob("*.yml"),
+              pathlib.Path("docker-compose.yml"),
+              pathlib.Path("examples/otel-collector-config.yaml"),
+          ]
+          for path in targets:
+              try:
+                  yaml.safe_load(path.read_text())
+                  print(f"ok   {path}")
+              except Exception as exc:
+                  failed.append(f"{path}: {exc}")
+                  print(f"FAIL {path}: {exc}")
+          # gh-aw workflows are markdown with a YAML frontmatter.
+          for path in pathlib.Path("integrations").rglob("*.md"):
+              text = path.read_text()
+              if not text.startswith("---\n"):
+                  continue
+              try:
+                  yaml.safe_load(text.split("---\n", 2)[1])
+                  print(f"ok   {path} (frontmatter)")
+              except Exception as exc:
+                  failed.append(f"{path}: {exc}")
+                  print(f"FAIL {path}: {exc}")
+          sys.exit(1 if failed else 0)
+          EOF
+
+  conventional-commits:
+    # Only meaningful on pull requests: the PR title becomes the squash-merge
+    # commit subject, so that is the thing worth enforcing.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          pattern='^(feat|fix|perf|refactor|test|docs|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: .+'
+          if printf '%s' "$PR_TITLE" | grep -qE "$pattern"; then
+            echo "ok: $PR_TITLE"
+          else
+            cat <<'MSG'
+          The pull request title must follow Conventional Commits.
+
+            <type>(<optional scope>): <subject>
+
+          Valid types: feat, fix, perf, refactor, test, docs, build, ci, chore, revert
+          Append ! for a breaking change: feat(fingerprint)!: switch to v2 rules
+
+          Examples:
+            fix(fingerprint): normalize unit-suffixed durations
+            feat(routing): support regex service patterns
+            docs: explain the label mutex
+
+          See CONTRIBUTING.md.
+          MSG
+            printf '\nGot: %s\n' "$PR_TITLE"
+            exit 1
+          fi
