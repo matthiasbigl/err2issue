@@ -77,6 +77,39 @@ def truncate(text: str | None, limit: int) -> str:
     return text[:limit] + f"\n... [truncated, {len(text) - limit} more characters]"
 
 
+def truncate_middle(text: str | None, limit: int) -> str:
+    """Shorten `text` to about `limit` characters, keeping its head and its tail.
+
+    A stack trace's most useful lines are often at the end: Python's error site
+    is the *last* frame, and Java's root `Caused by:` is at the bottom. So keep
+    roughly the first third and the last two thirds, cut on line boundaries
+    where possible, and say how much was dropped in between.
+    """
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    head_budget = max(limit // 3, 0)
+    tail_budget = max(limit - head_budget, 0)
+    head = text[:head_budget]
+    cut = head.rfind("\n")
+    if cut > 0:
+        head = head[:cut]
+    tail = text[len(text) - tail_budget :] if tail_budget else ""
+    cut = tail.find("\n")
+    if 0 <= cut < len(tail) - 1:
+        tail = tail[cut + 1 :]
+    omitted = len(text) - len(head) - len(tail)
+    return f"{head}\n... [{omitted} characters omitted] ...\n{tail}"
+
+
+def _cap_line(text: str, limit: int) -> str:
+    """Cap a single log line without introducing a line break."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f" … [{len(text) - limit} more characters]"
+
+
 # `str(exc)` of an exception constructed without arguments — or with an
 # explicit `None` — renders as one of these. They carry no information, so
 # they must not become the title when a real log message is sitting next to them.
@@ -122,6 +155,105 @@ def fence(text: str) -> str:
     return f"{marker}\n{text}\n{marker}"
 
 
+def _code(value: str | None) -> str:
+    """An inline code span that no backtick inside `value` can close early.
+
+    Whitespace, including newlines, collapses to single spaces so the span
+    stays on one line. Per CommonMark, a delimiter longer than any backtick run
+    in the content is safe, and a value that starts or ends with a backtick
+    needs a padding space (which the renderer strips again).
+    """
+    flat = _one_line(value)
+    if not flat:
+        return ""
+    longest = max((len(run) for run in re.findall(r"`+", flat)), default=0)
+    marker = "`" * (longest + 1)
+    if flat.startswith("`") or flat.endswith("`"):
+        flat = f" {flat} "
+    return f"{marker}{flat}{marker}"
+
+
+def _cell(value: str | None) -> str:
+    r"""A Markdown table cell holding `value` verbatim, as inline code.
+
+    GFM splits a row on every unescaped `|` -- even inside a code span -- so
+    pipes are escaped as `\|`. The row scanner treats `\\` as an escape pair,
+    so backslashes already in front of a pipe are doubled first; otherwise a
+    value of `a\|b` would still end the cell. The table unescapes `\|` before
+    the code span renders, so the reader sees the original pipe.
+    """
+    escaped = re.sub(r"(\\*)\|", lambda m: m.group(1) * 2 + "\\|", _one_line(value))
+    return _code(escaped)
+
+
+_INLINE_SPECIALS = re.compile(r"([\\`*_\[\]<>|#!~&])")
+
+
+def _inline(value: str | None) -> str:
+    """Plain Markdown text on one line, every formatting character escaped."""
+    return _INLINE_SPECIALS.sub(r"\\\1", _one_line(value))
+
+
+def _attr(event: ErrorEvent, *keys: str) -> str:
+    """The first non-empty value among `keys`: record attributes, then resource."""
+    for source in (event.attributes, event.resource_attributes):
+        for key in keys:
+            value = (source.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _host(event: ErrorEvent) -> str:
+    host = _attr(event, "k8s.pod.name", "host.name")
+    namespace = _attr(event, "k8s.namespace.name")
+    if host and namespace:
+        return f"{host} (ns {namespace})"
+    return host
+
+
+def _environment(event: ErrorEvent) -> str:
+    return _attr(event, "deployment.environment.name", "deployment.environment")
+
+
+def _glance_rows(event: ErrorEvent) -> list[tuple[str, str]]:
+    """Optional at-a-glance table rows, each present only when its data exists.
+
+    Both the current and the older OTel semantic-convention names resolve.
+    """
+    rows: list[tuple[str, str]] = []
+
+    environment = _environment(event)
+    if environment:
+        rows.append(("Environment", _cell(truncate(environment, 200))))
+
+    host = _host(event)
+    if host:
+        rows.append(("Host", _cell(truncate(host, 200))))
+
+    file_path = _attr(event, "code.file.path", "code.filepath")
+    line_no = _attr(event, "code.line.number", "code.lineno")
+    function = _attr(event, "code.function.name", "code.function")
+    if file_path or function:
+        location = f"{file_path}:{line_no}" if file_path and line_no else file_path
+        if function:
+            location = f"{location} in {function}" if location else function
+        rows.append(("Location", _cell(truncate(location, 300))))
+
+    method = _attr(event, "http.request.method", "http.method")
+    route = _attr(event, "http.route", "url.path", "http.target")
+    status = _attr(event, "http.response.status_code", "http.status_code")
+    request = " ".join(part for part in (method, route) if part)
+    if request or status:
+        text = f"{request} → {status}" if request and status else request or status
+        rows.append(("Request", _cell(truncate(text, 300))))
+
+    if _attr(event, "exception.escaped").lower() == "true":
+        rows.append(("Escaped", "yes (unhandled)"))
+
+    return rows
+
+
 def _exception_line(event: ErrorEvent, limit: int) -> str:
     if not (event.exception_message or "").strip():
         return event.exception_type
@@ -130,6 +262,17 @@ def _exception_line(event: ErrorEvent, limit: int) -> str:
 
 def _fmt_time(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+_MAX_LOG_LINE_CHARS = 500
+
+
+def _log_block(lines: list[LogLine]) -> str:
+    return "\n".join(
+        f"{_fmt_time(line.timestamp)}  {line.severity:<5}  "
+        f"{_cap_line(line.text, _MAX_LOG_LINE_CHARS)}"
+        for line in lines
+    )
 
 
 def machine_header(fingerprint: str, version: str, count: int) -> str:
@@ -176,20 +319,22 @@ def build_body(
     max_message_chars: int = 2000,
     max_stacktrace_chars: int = 6000,
     max_log_lines: int = 20,
+    max_attribute_rows: int = 50,
 ) -> str:
     first = first_seen or event.timestamp
     parts: list[str] = [machine_header(fingerprint, version, count), ""]
 
-    parts.append(f"**`{event.exception_type}`** in **{event.service_name}**")
+    parts.append(f"**{_code(event.exception_type)}** in **{_inline(event.service_name)}**")
     parts.append("")
 
     rows = [
         ("First seen", _fmt_time(first)),
         ("Last seen", _fmt_time(event.timestamp)),
         ("Occurrences", str(count)),
-        ("Service", f"`{event.service_name}`"),
-        ("Version", f"`{event.service_version}`" if event.service_version else "_unknown_"),
+        ("Service", _cell(event.service_name)),
+        ("Version", _cell(event.service_version) if event.service_version else "_unknown_"),
         ("Severity", f"`{event.severity}`"),
+        *_glance_rows(event),
         ("Fingerprint", f"`{version}:{fingerprint}`"),
     ]
     if event.trace_id:
@@ -223,19 +368,14 @@ def build_body(
     if event.stacktrace:
         parts.append("### Stack trace")
         parts.append("")
-        parts.append("```")
-        parts.append(truncate(event.stacktrace, max_stacktrace_chars))
-        parts.append("```")
+        parts.append(fence(truncate_middle(event.stacktrace, max_stacktrace_chars)))
         parts.append("")
 
     lines = (correlated or [])[-max_log_lines:]
     if lines:
-        parts.append(f"### Correlated log lines (trace `{event.trace_id}`)")
+        parts.append(f"### Correlated log lines (trace {_code(event.trace_id)})")
         parts.append("")
-        parts.append("```")
-        for line in lines:
-            parts.append(f"{_fmt_time(line.timestamp)}  {line.severity:<5}  {line.text}")
-        parts.append("```")
+        parts.append(fence(_log_block(lines)))
         parts.append("")
 
     attributes = {
@@ -248,8 +388,11 @@ def build_body(
         parts.append("")
         parts.append("| Attribute | Value |")
         parts.append("|---|---|")
-        for key, value in attributes.items():
-            parts.append(f"| `{key}` | `{truncate(value, 200)}` |")
+        items = list(attributes.items())
+        for key, value in items[:max_attribute_rows]:
+            parts.append(f"| {_cell(key)} | {_cell(truncate(value, 200))} |")
+        if len(items) > max_attribute_rows:
+            parts.append(f"| _+{len(items) - max_attribute_rows} more_ | |")
         parts.append("")
         parts.append("</details>")
         parts.append("")
@@ -258,8 +401,8 @@ def build_body(
     parts.append(
         "<sub>Filed automatically by "
         "[err2issue](https://github.com/matthiasbigl/err2issue). "
-        "Occurrence count is in the title; this body always reflects the most "
-        "recent occurrence.</sub>"
+        "Occurrence count is in the title; counts and last-seen are kept current, "
+        "and each later occurrence is recorded as a comment.</sub>"
     )
     return "\n".join(parts)
 
@@ -282,9 +425,15 @@ def build_occurrence_comment(
     parts.append("")
     parts.append(f"- **Seen at** {_fmt_time(event.timestamp)}")
     if event.service_version:
-        parts.append(f"- **Version** `{event.service_version}`")
+        parts.append(f"- **Version** {_code(event.service_version)}")
+    environment = _environment(event)
+    if environment:
+        parts.append(f"- **Environment** {_code(truncate(environment, 200))}")
+    host = _host(event)
+    if host:
+        parts.append(f"- **Host** {_code(truncate(host, 200))}")
     if event.trace_id:
-        parts.append(f"- **Trace** `{event.trace_id}`")
+        parts.append(f"- **Trace** {_code(event.trace_id)}")
     parts.append("")
 
     logged = log_message(event)
@@ -300,10 +449,7 @@ def build_occurrence_comment(
     if lines:
         parts.append("<details><summary>Correlated log lines</summary>")
         parts.append("")
-        parts.append("```")
-        for line in lines:
-            parts.append(f"{_fmt_time(line.timestamp)}  {line.severity:<5}  {line.text}")
-        parts.append("```")
+        parts.append(fence(_log_block(lines)))
         parts.append("")
         parts.append("</details>")
         parts.append("")
@@ -311,9 +457,7 @@ def build_occurrence_comment(
     if regression and event.stacktrace:
         parts.append("<details><summary>Stack trace</summary>")
         parts.append("")
-        parts.append("```")
-        parts.append(truncate(event.stacktrace, max_stacktrace_chars))
-        parts.append("```")
+        parts.append(fence(truncate_middle(event.stacktrace, max_stacktrace_chars)))
         parts.append("")
         parts.append("</details>")
     return "\n".join(parts).rstrip()

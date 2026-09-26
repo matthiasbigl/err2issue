@@ -121,7 +121,7 @@ def test_exception_attributes_are_not_repeated_in_the_attribute_table():
 def test_long_stacktrace_is_truncated_with_a_marker():
     event = make_event(stacktrace="line\n" * 5000)
     body = ctx.build_body(event, "abc", "v1", "s", max_stacktrace_chars=500)
-    assert "truncated" in body
+    assert "characters omitted" in body
     assert len(body) < 5000
 
 
@@ -299,3 +299,235 @@ def test_fallback_title_prefers_an_informative_exception_message():
 def test_fence_survives_backticks_in_the_content():
     fenced = ctx.fence("before\n```\ninjected\n```\nafter")
     assert fenced.startswith("````\n") and fenced.endswith("\n````")
+
+
+# -- Markdown safety: exception text is attacker-controlled ------------------
+
+
+def _stack_section(body: str) -> str:
+    return body.split("### Stack trace\n\n", 1)[1].split("\n\n", 1)[0]
+
+
+def test_a_stack_containing_a_fence_stays_inside_one_block():
+    stack = "frame one\n```\n## injected heading\n```\nframe two"
+    body = ctx.build_body(make_event(stacktrace=stack), "abc", "v2", "")
+    section = _stack_section(body)
+    assert section.startswith("````\n") and "\n````" in section
+    assert "## injected heading" in section
+    # nothing leaks out as real Markdown between the stack and the next heading
+    assert "\n## injected heading" not in body.replace(section, "")
+
+
+def test_correlated_lines_and_comment_blocks_use_a_safe_fence():
+    line = make_log_line("evil ``` line")
+    body = ctx.build_body(make_event(), "abc", "v2", "", correlated=[line])
+    assert "````\n2026-07-28 11:59:59 UTC  INFO   evil ``` line\n````" in body
+    comment = ctx.build_occurrence_comment(
+        make_event(stacktrace="a\n```\nb"), count=2, correlated=[line], regression=True
+    )
+    assert comment.count("````") == 4
+
+
+def _table_rows(body: str) -> list[str]:
+    return [line for line in body.splitlines() if line.startswith("| ")]
+
+
+def test_an_attribute_value_with_a_pipe_and_newline_stays_on_one_row():
+    event = make_event(attributes={"custom.note": "a|b\nc"})
+    body = ctx.build_body(event, "abc", "v2", "")
+    rows = [row for row in _table_rows(body) if "custom.note" in row]
+    assert rows == ["| `custom.note` | `a\\|b c` |"]
+
+
+def test_cell_escapes_backslashes_that_precede_a_pipe():
+    # `\\|` would read as an escaped backslash followed by a live cell separator.
+    assert ctx._cell("a\\|b") == "`a\\\\\\|b`"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("plain", "`plain`"),
+        ("has `tick` inside", "``has `tick` inside``"),
+        ("ends `tick`", "`` ends `tick` ``"),
+        ("`starts", "`` `starts ``"),
+        ("run ``` of three", "````run ``` of three````"),
+        ("", ""),
+    ],
+)
+def test_code_span_outlasts_the_backticks_inside_it(value, expected):
+    assert ctx._code(value) == expected
+
+
+def test_service_and_version_rows_are_escaped():
+    event = make_event(service_name="svc|x", service_version="1`2")
+    rows = _table_rows(ctx.build_body(event, "abc", "v2", ""))
+    assert "| Service | `svc\\|x` |" in rows
+    assert "| Version | ``1`2`` |" in rows
+
+
+def test_headline_escapes_markdown_in_the_service_name():
+    event = make_event(service_name="**bold** [x](y)\n# h", exception_type="Err`or")
+    headline = ctx.build_body(event, "abc", "v2", "").splitlines()[2]
+    assert headline == "**``Err`or``** in **\\*\\*bold\\*\\* \\[x\\](y) \\# h**"
+
+
+def test_attribute_table_is_capped_with_a_more_row():
+    attrs = {f"k{i:03}": "v" for i in range(60)}
+    body = ctx.build_body(make_event(attributes=attrs), "abc", "v2", "")
+    table = body.split("Runtime attributes")[1]
+    # 60 custom + 2 resource attributes from make_event, minus 50 shown
+    assert "| _+12 more_ | |" in table
+    assert "`k049`" in table and "`k050`" not in table
+
+
+def test_a_long_correlated_line_is_capped_on_one_line():
+    body = ctx.build_body(make_event(), "abc", "v2", "", correlated=[make_log_line("x" * 2000)])
+    block = body.split("### Correlated log lines")[1]
+    assert "x" * 500 + " … [1500 more characters]" in block
+    assert "x" * 501 not in block
+
+
+# -- head-and-tail truncation ------------------------------------------------
+
+
+def test_truncate_middle_keeps_the_final_python_frame_and_the_exception():
+    frames = "".join(
+        f'  File "/app/src/mod{i}.py", line {i}, in f{i}\n    call{i}()\n' for i in range(300)
+    )
+    trace = f"Traceback (most recent call last):\n{frames}ValueError: final boom\n"
+    body = ctx.build_body(make_event(stacktrace=trace), "abc", "v2", "", max_stacktrace_chars=900)
+    section = _stack_section(body)
+    assert "Traceback (most recent call last):" in section
+    assert '  File "/app/src/mod299.py", line 299, in f299' in section
+    assert "ValueError: final boom" in section
+    assert "characters omitted" in section
+    assert len(section) < 1100
+
+
+def test_truncate_middle_cuts_on_line_boundaries_and_counts_what_it_drops():
+    text = "\n".join(f"line {i:04}" for i in range(1000))
+    out = ctx.truncate_middle(text, 300)
+    head, marker, tail = out.partition("\n... [")
+    assert all(line.startswith("line ") and len(line) == 9 for line in head.splitlines())
+    tail_lines = tail.split("\n", 1)[1].splitlines()
+    assert all(len(line) == 9 for line in tail_lines)
+    assert tail_lines[-1] == "line 0999"
+    omitted = int(tail.split(" characters omitted")[0])
+    assert omitted == len(text) - len(head) - len("\n".join(tail_lines))
+
+
+def test_truncate_middle_leaves_short_text_alone():
+    assert ctx.truncate_middle("short", 100) == "short"
+    assert ctx.truncate_middle(None, 10) == ""
+
+
+def test_regression_comment_keeps_the_tail_of_a_long_stack():
+    trace = "head\n" + "middle\n" * 1000 + "Caused by: root.Cause: here"
+    comment = ctx.build_occurrence_comment(
+        make_event(stacktrace=trace), count=2, regression=True, max_stacktrace_chars=300
+    )
+    assert "Caused by: root.Cause: here" in comment
+
+
+# -- at-a-glance rows ----------------------------------------------------------
+
+
+def _row(body: str, name: str) -> str | None:
+    for row in _table_rows(body):
+        if row.startswith(f"| {name} |"):
+            return row
+    return None
+
+
+GLANCE = ("Location", "Environment", "Host", "Request", "Escaped")
+
+
+def test_glance_rows_are_absent_without_their_attributes():
+    body = ctx.build_body(make_event(attributes={}, resource_attributes={}), "abc", "v2", "")
+    for name in GLANCE:
+        assert _row(body, name) is None, name
+
+
+def test_glance_rows_from_current_semconv_names():
+    event = make_event(
+        attributes={
+            "code.file.path": "src/cart.py",
+            "code.line.number": "88",
+            "code.function.name": "total",
+            "http.request.method": "POST",
+            "http.route": "/checkout",
+            "http.response.status_code": "500",
+            "exception.escaped": "true",
+        },
+        resource_attributes={
+            "deployment.environment.name": "production",
+            "k8s.pod.name": "checkout-7d9f",
+            "k8s.namespace.name": "shop",
+            "host.name": "node-1",
+        },
+    )
+    body = ctx.build_body(event, "abc", "v2", "")
+    assert _row(body, "Location") == "| Location | `src/cart.py:88 in total` |"
+    assert _row(body, "Environment") == "| Environment | `production` |"
+    assert _row(body, "Host") == "| Host | `checkout-7d9f (ns shop)` |"
+    assert _row(body, "Request") == "| Request | `POST /checkout → 500` |"
+    assert _row(body, "Escaped") == "| Escaped | yes (unhandled) |"
+
+
+def test_glance_rows_from_older_semconv_names():
+    event = make_event(
+        attributes={
+            "code.filepath": "src/cart.py",
+            "code.lineno": "88",
+            "code.function": "total",
+            "http.method": "GET",
+            "http.target": "/cart?id=1",
+            "http.status_code": "502",
+        },
+        resource_attributes={"deployment.environment": "staging", "host.name": "vm-3"},
+    )
+    body = ctx.build_body(event, "abc", "v2", "")
+    assert _row(body, "Location") == "| Location | `src/cart.py:88 in total` |"
+    assert _row(body, "Environment") == "| Environment | `staging` |"
+    assert _row(body, "Host") == "| Host | `vm-3` |"
+    assert _row(body, "Request") == "| Request | `GET /cart?id=1 → 502` |"
+    assert _row(body, "Escaped") is None
+
+
+def test_record_attributes_win_over_resource_attributes():
+    event = make_event(
+        attributes={"deployment.environment": "canary"},
+        resource_attributes={"deployment.environment.name": "production"},
+    )
+    assert _row(ctx.build_body(event, "abc", "v2", ""), "Environment") == (
+        "| Environment | `canary` |"
+    )
+
+
+def test_escaped_row_needs_a_true_value():
+    event = make_event(attributes={"exception.escaped": "false"})
+    assert _row(ctx.build_body(event, "abc", "v2", ""), "Escaped") is None
+
+
+def test_partial_location_and_request_render_what_exists():
+    event = make_event(attributes={"code.function.name": "total", "url.path": "/x"})
+    body = ctx.build_body(event, "abc", "v2", "")
+    assert _row(body, "Location") == "| Location | `total` |"
+    assert _row(body, "Request") == "| Request | `/x` |"
+
+
+def test_occurrence_comment_carries_environment_and_host():
+    event = make_event(
+        resource_attributes={"deployment.environment.name": "production", "host.name": "vm-3"}
+    )
+    comment = ctx.build_occurrence_comment(event, count=2)
+    assert "- **Environment** `production`" in comment
+    assert "- **Host** `vm-3`" in comment
+    bare = ctx.build_occurrence_comment(make_event(resource_attributes={}), count=2)
+    assert "Environment" not in bare and "Host" not in bare
+
+
+def test_footer_says_later_occurrences_become_comments():
+    body = ctx.build_body(make_event(), "abc", "v2", "")
+    assert "each later occurrence is recorded as a comment" in body

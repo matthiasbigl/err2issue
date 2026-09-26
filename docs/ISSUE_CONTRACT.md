@@ -98,14 +98,32 @@ literal ```` ``` ````.
 | `### Summary` | Two or three sentences, AI-written |
 | `### Log message` | Fenced block: the log record's body, verbatim. Present only when it says something `exception.message` does not |
 | `### Exception` | Fenced block: `Type: message`, or just `Type` when the message is empty |
-| `### Stack trace` | Fenced block, **top frame first** |
+| `### Stack trace` | Fenced block, frames in the order the runtime emitted them; long traces keep head and tail, with a `... [N characters omitted] ...` line between |
 | `### Correlated log lines (trace \`…\`)` | Fenced block, oldest first |
 | `<details><summary>Runtime attributes</summary>` | Markdown table of span attributes |
 
 ## Not stable — do not parse
 
-The prose in `### Summary`, exact table row order, timestamp formatting, and the
-footer. Read these; do not build a parser on them.
+The prose in `### Summary`, the set and order of rows in the summary table,
+timestamp formatting, and the footer. Read these; do not build a parser on them.
+
+The summary table always carries first/last seen, occurrences, service,
+version, severity, and fingerprint. The rows below appear only when the record
+or its resource carries the attribute — record attributes win, and current and
+older semantic-convention names both resolve:
+
+| Row | From |
+|---|---|
+| Environment | `deployment.environment.name`, `deployment.environment` |
+| Host | `k8s.pod.name`, `host.name`, plus `(ns k8s.namespace.name)` |
+| Location | `code.file.path`/`code.filepath`, `:code.line.number`/`code.lineno`, `in code.function.name`/`code.function` |
+| Request | `http.request.method`/`http.method`, `http.route`/`url.path`/`http.target`, `→ http.response.status_code`/`http.status_code` |
+| Escaped | `yes (unhandled)` when `exception.escaped` is `true` |
+
+Occurrence comments repeat Environment and Host as bullets. Attacker-influenced
+values in tables are rendered as inline code with `|` escaped and newlines
+collapsed, so they cannot break out of their row. The runtime attributes table
+shows at most 50 rows, then a `+N more` row.
 
 ## Lifecycle
 
@@ -217,6 +235,11 @@ exist. If you write one:
 | Service | `checkout-api` |
 | Version | `1.4.2` |
 | Severity | `ERROR` |
+| Environment | `production` |
+| Host | `checkout-7d9f4 (ns shop)` |
+| Location | `src/checkout/cart.py:88 in total` |
+| Request | `POST /checkout → 500` |
+| Escaped | yes (unhandled) |
 | Fingerprint | `v2:a3f9c21b8e04` |
 | Trace ID | `4bf92f3577b34da6a3ce929d0e0e4736` |
 
@@ -252,9 +275,15 @@ TypeError: unsupported operand type(s) for +: 'int' and 'NoneType'
 
 | Attribute | Value |
 |---|---|
-| `deployment.environment` | `production` |
+| `code.file.path` | `src/checkout/cart.py` |
+| `code.function.name` | `total` |
+| `code.line.number` | `88` |
+| `deployment.environment.name` | `production` |
+| `http.request.method` | `POST` |
+| `http.response.status_code` | `500` |
 | `http.route` | `/checkout` |
-| `http.status_code` | `500` |
+| `k8s.namespace.name` | `shop` |
+| `k8s.pod.name` | `checkout-7d9f4` |
 
 </details>
 ```
