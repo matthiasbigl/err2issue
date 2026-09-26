@@ -194,6 +194,49 @@ def _inline(value: str | None) -> str:
     return _INLINE_SPECIALS.sub(r"\\\1", _one_line(value))
 
 
+# Model output is rendered as Markdown in the issue, and the model read text an
+# attacker can put in a production error message. So the summary is treated as
+# untrusted: nothing in it may notify a person, cross-reference another issue,
+# load a remote image, hide a link target, or inject HTML (including a fake
+# machine header).
+_CODE_SPAN = re.compile(r"(`+)(?:.+?)\1", re.DOTALL)
+_MENTION = re.compile(r"(?<![\w`/.@-])@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:/[\w.-]+)?")
+_ISSUE_REF = re.compile(r"(?<![^\s(\[{,;:'\"])(?:[\w.-]+/[\w.-]+)?#\d+\b")
+_LINK = re.compile(r"!?\[([^\]\n]*)\]\(\s*([^)\s]*)[^)]*\)")
+MAX_SUMMARY_CHARS = 1500
+
+
+def _defang(text: str) -> str:
+    text = _LINK.sub(lambda m: f"{m.group(1)} ({m.group(2)})" if m.group(2) else m.group(1), text)
+    text = text.replace("<", "&lt;")
+    text = _MENTION.sub(lambda m: f"`{m.group(0)}`", text)
+    return _ISSUE_REF.sub(lambda m: f"`{m.group(0)}`", text)
+
+
+def sanitize_summary(text: str | None, limit: int = MAX_SUMMARY_CHARS) -> str:
+    """Make model-written Markdown safe to post: prose stays, side effects go.
+
+    Outside code spans: `@user` and `@org/team` become inline code (no
+    notification), `#12` and `owner/repo#12` become inline code (no
+    cross-reference backlink), links and images are flattened to `text (url)`,
+    and `<` is escaped so no HTML — images, comments, a forged err2issue header —
+    survives. Code spans are left alone; nothing in them has a side effect.
+    Idempotent below the length cap, so applying it twice (once at the model
+    boundary, again when the body is built) is harmless.
+    """
+    text = (text or "").strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip() + " …"
+    out: list[str] = []
+    position = 0
+    for match in _CODE_SPAN.finditer(text):
+        out.append(_defang(text[position : match.start()]))
+        out.append(match.group(0))
+        position = match.end()
+    out.append(_defang(text[position:]))
+    return "".join(out)
+
+
 def _attr(event: ErrorEvent, *keys: str) -> str:
     """The first non-empty value among `keys`: record attributes, then resource."""
     for source in (event.attributes, event.resource_attributes):
@@ -361,6 +404,7 @@ def build_body(
     parts.extend(f"| {name} | {value} |" for name, value in rows)
     parts.append("")
 
+    summary = sanitize_summary(summary)
     if summary:
         parts.append("### Summary")
         parts.append("")

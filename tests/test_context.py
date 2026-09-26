@@ -559,3 +559,52 @@ def test_a_non_hex_trace_id_is_never_put_in_a_url():
 def test_occurrence_comment_links_the_trace():
     comment = ctx.build_occurrence_comment(make_event(), count=2, trace_url_template=TEMPLATE)
     assert "(https://grafana.example.com/explore?traceId=4bf92f" in comment
+
+
+# -- AI summary sanitisation -------------------------------------------------
+
+
+def test_summary_mentions_do_not_notify_anyone():
+    out = ctx.sanitize_summary("Ping @alice and @acme/oncall now.")
+    assert out == "Ping `@alice` and `@acme/oncall` now."
+
+
+def test_summary_issue_references_do_not_create_backlinks():
+    out = ctx.sanitize_summary("Same as #12 and acme/api#3.")
+    assert out == "Same as `#12` and `acme/api#3`."
+
+
+def test_summary_emails_and_url_fragments_are_not_mangled():
+    text = "Mail ops@example.com; see https://docs.example.com/page#12 for details."
+    assert ctx.sanitize_summary(text) == text
+
+
+def test_summary_links_and_images_are_flattened_so_the_target_is_visible():
+    out = ctx.sanitize_summary("[fix it](https://evil.example/x) ![p](https://t.example/p.png)")
+    assert out == "fix it (https://evil.example/x) p (https://t.example/p.png)"
+
+
+def test_summary_html_and_forged_headers_are_escaped():
+    forged = ctx.machine_header("ab" * 6, "v2", 999)
+    out = ctx.sanitize_summary(f"<img src=x> {forged}")
+    assert "<" not in out
+    assert ctx.parse_header(out) is None
+
+
+def test_summary_code_spans_are_left_verbatim():
+    text = "Guard `total += item.price` against `None`; see `@decorator` and `#1`."
+    assert ctx.sanitize_summary(text) == text
+
+
+def test_summary_sanitisation_is_idempotent_and_capped():
+    text = "@a #1 [x](y) <b> `c` " * 5
+    once = ctx.sanitize_summary(text)
+    assert ctx.sanitize_summary(once) == once
+    capped = ctx.sanitize_summary("x" * 5000)
+    assert len(capped) <= ctx.MAX_SUMMARY_CHARS + 2 and capped.endswith("…")
+
+
+def test_body_sanitises_the_summary_it_is_given():
+    body = ctx.build_body(make_event(), "ab" * 6, "v2", "Ask @alice about it.")
+    assert "`@alice`" in body
+    assert "Ask @alice" not in body

@@ -25,9 +25,11 @@ class RecordingEnricher:
         self.title = title
         self.summary = summary
         self.seen = []
+        self.correlated = []
 
-    async def enrich(self, event):
+    async def enrich(self, event, correlated=None):
         self.seen.append(event)
+        self.correlated.append(list(correlated or []))
         return Enrichment(title=self.title, summary=self.summary, source="ai")
 
 
@@ -247,7 +249,7 @@ async def test_correlated_log_lines_pass_through_when_redaction_is_disabled():
 
 
 class FallbackEnricher(RecordingEnricher):
-    async def enrich(self, event):
+    async def enrich(self, event, correlated=None):
         self.seen.append(event)
         return Enrichment(title="fallback", summary="", source="fallback")
 
@@ -293,3 +295,46 @@ async def test_the_ai_summary_reaches_the_sink_as_the_description():
     pipeline = build(sink=sink, enricher=RecordingEnricher(summary="Cart sums null prices."))
     await pipeline.handle(make_event())
     assert sink.descriptions == ["Cart sums null prices."]
+
+
+# -- attribute-key redaction, enrichment context, suppression metrics -------
+
+
+async def test_sensitive_attribute_values_are_masked_before_enrichment_and_delivery():
+    password = "hun" + "ter2"
+    enricher = RecordingEnricher()
+    sink = CapturingSink()
+    pipeline = build(sink=sink, enricher=enricher)
+    event = make_event(
+        attributes={"db.password": password, "http.route": "/checkout"},
+        resource_attributes={"service.name": "checkout-api", "app.api_key": password},
+    )
+    result = await pipeline.handle(event)
+    assert result is not None
+    [seen] = enricher.seen
+    assert seen.attributes == {"db.password": "[REDACTED]", "http.route": "/checkout"}
+    assert seen.resource_attributes["app.api_key"] == "[REDACTED]"
+
+
+async def test_the_enricher_receives_the_redacted_correlated_lines():
+    secret = "ghp_" + "Q" * 36
+    enricher = RecordingEnricher()
+    pipeline = build(enricher=enricher)
+    event = make_event()
+    pipeline.absorb_context(
+        [make_log_line("loading cart 42"), make_log_line(f"token {secret}")], [event.trace_id] * 2
+    )
+    await pipeline.handle(event)
+    [lines] = enricher.correlated
+    assert [line.text for line in lines] == ["loading cart 42", "token [REDACTED]"]
+
+
+async def test_suppression_is_exported_per_reason_for_alerting():
+    pipeline = build()
+    text = pipeline.metrics.as_prometheus()
+    # Present at zero, so an alert has a series before the first exhaustion.
+    assert 'err2issue_suppressed_by_reason_total{reason="budget"} 0' in text
+    for _ in range(2):
+        await pipeline.handle(make_event())
+    text = pipeline.metrics.as_prometheus()
+    assert 'err2issue_suppressed_by_reason_total{reason="window"} 1' in text

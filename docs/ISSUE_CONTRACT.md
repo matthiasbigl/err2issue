@@ -95,12 +95,25 @@ literal ```` ``` ````.
 
 | Heading | Contents |
 |---|---|
-| `### Summary` | Two or three sentences, AI-written |
+| `### Summary` | Two or three sentences, AI-written, sanitised (see below) |
 | `### Log message` | Fenced block: the log record's body, verbatim. Present only when it says something `exception.message` does not |
 | `### Exception` | Fenced block: `Type: message`, or just `Type` when the message is empty |
 | `### Stack trace` | Fenced block, frames in the order the runtime emitted them; long traces keep head and tail, with a `... [N characters omitted] ...` line between |
 | `### Correlated log lines (trace \`…\`)` | Fenced block, oldest first |
 | `<details><summary>Runtime attributes</summary>` | Markdown table of span attributes |
+
+The model that writes `### Summary` read production text, so its output is
+treated as untrusted too. Outside code spans, `@user` and `@org/team` become
+inline code (nobody is notified), `#12` and `owner/repo#12` become inline code
+(no cross-reference lands in another issue), links and images are flattened to
+`text (url)` so the target is always visible, and `<` is escaped so no HTML —
+tracking images, comments, a forged machine header — survives. The summary is
+capped at 1,500 characters.
+
+Attribute values whose key names a credential (`db.password`,
+`http.request.header.authorization`, `…cookie`, `…x-api-key`, and similar,
+matched on the last dotted segment) are shown as `[REDACTED]` whatever their
+shape.
 
 ## Not stable — do not parse
 
