@@ -540,14 +540,15 @@ async def test_body_without_a_header_is_not_patched():
 
 
 @respx.mock
-async def test_a_huge_log_line_still_files_within_the_body_limit():
+async def test_an_oversized_body_still_files_within_the_body_limit():
+    """Rendering caps each section, but a generous config can still overflow."""
     from err2issue.context import parse_header
 
     create = _mock_create_path()
-    huge = make_log_line("x" * 100_000)
+    huge = "\n".join(f'  File "/app/x.py", line {i}, in f' for i in range(10_000))
     async with httpx.AsyncClient() as http:
-        result = await build_filer(http).file(
-            make_event(), FINGERPRINT, REPO, "s", correlated=[huge]
+        result = await build_filer(http, max_stacktrace_chars=1_000_000).file(
+            make_event(stacktrace=huge), FINGERPRINT, REPO, "s"
         )
     assert result.action == "created"
     body = body_of(create)["body"]

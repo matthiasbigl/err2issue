@@ -438,7 +438,7 @@ def build_occurrence_comment(
 
     logged = log_message(event)
     if logged:
-        parts.append(f"> {truncate(_one_line(logged), 500)}")
+        parts.append(fence(truncate(logged, 500)))
         parts.append("")
 
     if event.exception_message:

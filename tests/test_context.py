@@ -269,7 +269,7 @@ def test_empty_exception_message_renders_without_a_dangling_colon():
 
 def test_occurrence_comment_carries_the_log_message():
     comment = ctx.build_occurrence_comment(make_event(**SHIELDED), count=2)
-    assert "> ConnectionClosedError exception in shielded future" in comment
+    assert "```\nConnectionClosedError exception in shielded future\n```" in comment
 
 
 @pytest.mark.parametrize("placeholder", ["None", "null", "", "  ", "undefined", "TypeError"])
