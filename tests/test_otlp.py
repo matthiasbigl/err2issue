@@ -368,3 +368,84 @@ def test_span_less_lines_are_not_correlated_through_a_zero_trace():
     events, _ = otlp.to_events(error)
     assert events[0].trace_id is None
     assert buffer.get(events[0].trace_id) == []
+
+
+# -- severity text fallback and message-only exceptions --------------------
+
+
+def _unspecified(text: str, **kwargs) -> dict:
+    payload = otlp_json(severity_number=0, exception_type=None, body="db pool exhausted", **kwargs)
+    _record(payload)["severityText"] = text
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("text", "number"),
+    [
+        ("ERROR", 17),
+        ("error", 17),
+        (" Error ", 17),
+        ("ERROR3", 19),
+        ("SEVERE", 17),
+        ("FATAL", 21),
+        ("CRITICAL", 21),
+        ("critical", 21),
+        ("EMERG", 23),
+    ],
+)
+def test_unspecified_number_falls_back_to_severity_text(text, number):
+    events, lines = otlp.to_events(otlp.decode_json(_unspecified(text)))
+    assert len(events) == 1 and not lines
+    assert events[0].severity_number == number
+    assert events[0].exception_type == "Error"
+    assert events[0].exception_message == "db pool exhausted"
+
+
+@pytest.mark.parametrize("text", ["INFO", "WARN", "warning", "", "ERRORS", "debug"])
+def test_non_error_severity_text_stays_a_context_line(text):
+    events, lines = otlp.to_events(otlp.decode_json(_unspecified(text)))
+    assert not events and len(lines) == 1
+
+
+def test_severity_text_never_overrides_an_explicit_number():
+    payload = otlp_json(severity_number=9, exception_type=None, body="handled")
+    _record(payload)["severityText"] = "ERROR"
+    events, _ = otlp.to_events(otlp.decode_json(payload))
+    assert events == []
+
+
+def test_severity_text_fallback_works_over_protobuf():
+    request = ExportLogsServiceRequest()
+    request.ParseFromString(build_protobuf(exc_type=None))
+    record = request.resource_logs[0].scope_logs[0].log_records[0]
+    record.severity_number = 0
+    record.severity_text = "fatal"
+    events, _ = otlp.to_events(otlp.decode_protobuf(request.SerializeToString()))
+    assert [e.severity_number for e in events] == [21]
+
+
+def test_severity_text_does_not_bypass_require_exception():
+    events, _ = otlp.to_events(otlp.decode_json(_unspecified("ERROR")), require_exception=True)
+    assert events == []
+
+
+def test_exception_message_without_type_counts_as_an_exception():
+    """Semconv: exception.type OR exception.message. `require_exception` used to
+    look at the type only, so message-only SDKs were dropped entirely."""
+    payload = otlp_json(severity_number=9, exception_type=None)
+    _record(payload)["attributes"] = [
+        {"key": "exception.message", "value": {"stringValue": "connection reset"}}
+    ]
+    events, _ = otlp.to_events(otlp.decode_json(payload), require_exception=True)
+    assert len(events) == 1
+    assert (events[0].exception_type, events[0].exception_message) == (
+        "Error",
+        "connection reset",
+    )
+
+
+def test_blank_exception_message_alone_is_not_an_exception():
+    payload = otlp_json(severity_number=9, exception_type=None, body="fine")
+    _record(payload)["attributes"] = [{"key": "exception.message", "value": {"stringValue": " "}}]
+    events, _ = otlp.to_events(otlp.decode_json(payload))
+    assert events == []

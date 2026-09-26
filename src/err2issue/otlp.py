@@ -295,15 +295,50 @@ def _id_from_json(value: Any, size: int) -> str | None:
 # --------------------------------------------------------------------------
 
 
-def is_error(record: dict[str, Any], require_exception: bool = False) -> bool:
-    """An error is severity >= ERROR (17), or any record carrying exception.type.
+# severity_text -> number, consulted only when severity_number is 0
+# (UNSPECIFIED). Several log bridges and hand-rolled exporters set only the
+# text, and syslog/JUL/Python level names leak through unmapped; reading the
+# number alone silently dropped every one of those errors.
+_SEVERITY_TEXT = {
+    **{f"ERROR{n}": SEVERITY_ERROR + i for i, n in enumerate(("", "2", "3", "4"))},
+    **{f"FATAL{n}": 21 + i for i, n in enumerate(("", "2", "3", "4"))},
+    "ERR": SEVERITY_ERROR,
+    "SEVERE": SEVERITY_ERROR,  # java.util.logging
+    "CRITICAL": 21,  # Python
+    "CRIT": 21,
+    "ALERT": 22,
+    "EMERG": 23,
+    "EMERGENCY": 23,
+    "PANIC": 23,
+}
 
-    OTel maps 17-20 to ERROR and 21-24 to FATAL, so `>= 17` covers both.
+
+def effective_severity(record: dict[str, Any]) -> int:
+    """The record's severity number, derived from its text when unspecified."""
+    number = record.get("severity_number") or 0
+    if number:
+        return number
+    text = record.get("severity_text")
+    if not isinstance(text, str):
+        return 0
+    return _SEVERITY_TEXT.get(text.strip().upper(), 0)
+
+
+def has_exception(record: dict[str, Any]) -> bool:
+    """Semconv requires exception.type *or* exception.message, not both."""
+    attributes = record["attributes"]
+    return bool(attributes.get(EXCEPTION_TYPE) or attributes.get(EXCEPTION_MESSAGE, "").strip())
+
+
+def is_error(record: dict[str, Any], require_exception: bool = False) -> bool:
+    """An error is severity >= ERROR (17), or any record carrying exception attributes.
+
+    OTel maps 17-20 to ERROR and 21-24 to FATAL, so `>= 17` covers both. An
+    unspecified (0) number falls back to the severity text.
     """
-    has_exception = bool(record["attributes"].get(EXCEPTION_TYPE))
-    if require_exception:
-        return has_exception
-    return has_exception or record["severity_number"] >= SEVERITY_ERROR
+    if has_exception(record):
+        return True
+    return not require_exception and effective_severity(record) >= SEVERITY_ERROR
 
 
 def _timestamp(nanos: int) -> datetime:
@@ -357,7 +392,7 @@ def to_events(
                     trace_id=record["trace_id"],
                     span_id=record["span_id"],
                     timestamp=timestamp,
-                    severity_number=record["severity_number"] or SEVERITY_ERROR,
+                    severity_number=effective_severity(record) or SEVERITY_ERROR,
                     body=record.get("body") or None,
                     attributes=dict(record["attributes"]),
                     resource_attributes=dict(resource_attrs),
