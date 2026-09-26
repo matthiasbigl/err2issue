@@ -77,6 +77,14 @@ Referenced from [AGENTS.md](../AGENTS.md), which is the file to read first.
 - The **JSON mapping permits both camelCase and snake_case** field names. Both
   are handled in `otlp.py`; do not "simplify" that away.
 - Severity: **17–20 is ERROR, 21–24 is FATAL**, so `>= 17` covers both.
+- **Do not trust the wire to match the spec.** Seen in real exports: severity
+  number `0` with only `severityText: "error"` (bridges), `severityNumber` as
+  the enum *name* (`MessageToJson` defaults), trace ids in uppercase hex or
+  base64, and an all-zero trace id on every record outside a span. That last
+  one is the dangerous one: kept verbatim it is one shared "trace" that pulls
+  every span-less INFO line into every span-less error's correlated context.
+  `otlp.py` normalizes all of these; a JSON shape it does not expect must skip
+  that field, never raise, because a 500 makes the collector retry forever.
 - **The log record body and `exception.message` are different texts; keep
   both.** `logger.exception("ConnectionClosedError exception in shielded
   future")` puts the useful sentence in the body and a bare `str(exc)` —
