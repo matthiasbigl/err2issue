@@ -4,6 +4,19 @@ All notable changes to err2issue. Versions follow [Semantic Versioning](https://
 while the major version is 0, a minor release may change behaviour, and every such change is
 listed under **Behaviour changes**.
 
+## v0.5.1 — 2026-09-26
+
+### Security
+
+- **cryptography 49.0.0 → 50.0.1** (CVE-2026-69247, HIGH: a Bleichenbacher oracle in PKCS#7
+  EnvelopedData decryption). err2issue reaches `cryptography` only through PyJWT, to sign
+  GitHub App tokens, and never decrypts PKCS#7, so the vulnerable code was not reachable; the
+  image carried it all the same, and image scanners rightly block on it.
+- CI now scans the built image with trivy (fixable HIGH/CRITICAL fail the build) before it
+  is published, so a vulnerable dependency stops here instead of in a deployment's scan.
+
+No behaviour changes. Drop-in: pull the new image.
+
 ## v0.5.0 — 2026-09-26
 
 v0.5 is about the issue itself: making sure what err2issue files says what actually went

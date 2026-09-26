@@ -1,6 +1,6 @@
 [project]
 name = "err2issue"
-version = "0.5.0"
+version = "0.5.1"
 description = "OpenTelemetry errors in, deduplicated GitHub issues out."
 readme = "README.md"
 requires-python = ">=3.11"

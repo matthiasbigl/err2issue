@@ -19,6 +19,7 @@ import contextlib
 import json
 import logging
 from contextlib import asynccontextmanager
+from importlib.metadata import version
 from typing import Any
 
 import httpx
@@ -174,7 +175,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="err2issue",
-        version="0.5.0",
+        # From the installed package, so a release bumps pyproject.toml alone.
+        version=version("err2issue"),
         summary="OpenTelemetry errors in, deduplicated GitHub issues out.",
         lifespan=lifespan,
     )
