@@ -227,3 +227,15 @@ def test_multiple_resources_and_scopes_are_all_walked():
     payload["resourceLogs"].append(otlp_json(service="other-api")["resourceLogs"][0])
     events, _ = otlp.to_events(otlp.decode_json(payload))
     assert {e.service_name for e in events} == {"checkout-api", "other-api"}
+
+
+def test_exception_record_keeps_its_log_body_alongside_the_message():
+    payload = otlp_json(
+        exception_type="ConnectionClosedError",
+        message="None",
+        stacktrace=None,
+        body="ConnectionClosedError exception in shielded future",
+    )
+    events, _ = otlp.to_events(otlp.decode_json(payload))
+    assert events[0].exception_message == "None"
+    assert events[0].body == "ConnectionClosedError exception in shielded future"

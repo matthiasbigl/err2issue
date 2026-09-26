@@ -77,6 +77,15 @@ Referenced from [AGENTS.md](../AGENTS.md), which is the file to read first.
 - The **JSON mapping permits both camelCase and snake_case** field names. Both
   are handled in `otlp.py`; do not "simplify" that away.
 - Severity: **17–20 is ERROR, 21–24 is FATAL**, so `>= 17` covers both.
+- **The log record body and `exception.message` are different texts; keep
+  both.** `logger.exception("ConnectionClosedError exception in shielded
+  future")` puts the useful sentence in the body and a bare `str(exc)` —
+  frequently `None` or empty — in `exception.message`. Rendering only the
+  exception once produced an issue titled `ConnectionClosedError: None` that
+  cost a reader an hour. The body is shown as `### Log message` whenever it adds
+  something (`context.log_message`), and the fallback title uses it when the
+  exception message is a placeholder (`context.is_uninformative`). Neither
+  touches the fingerprint, so this needed no version bump.
 - Errors with **no stack trace are normal** (Go, JS across a bundler boundary,
   severity-only records). The fingerprint has a documented message fallback.
 

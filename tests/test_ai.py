@@ -164,3 +164,23 @@ async def test_fallback_title_is_still_useful():
 async def test_enabled_flag_is_false_without_a_key_or_client():
     assert Enricher(api_key=None, enabled=True).enabled is False
     assert Enricher(client=FakeClient(result=good_response()), enabled=True).enabled is True
+
+
+async def test_prompt_includes_the_log_message_when_it_adds_information():
+    client = FakeClient(result=good_response())
+    event = make_event(
+        exception_type="ConnectionClosedError",
+        exception_message="None",
+        body="ConnectionClosedError exception in shielded future",
+    )
+    await Enricher(client=client).enrich(event)
+    prompt = client.messages.calls[0]["messages"][0]["content"]
+    assert "Log message: ConnectionClosedError exception in shielded future" in prompt
+
+
+async def test_prompt_omits_a_log_message_that_repeats_the_exception():
+    client = FakeClient(result=good_response())
+    event = make_event(exception_message="boom", body="boom")
+    await Enricher(client=client).enrich(event)
+    prompt = client.messages.calls[0]["messages"][0]["content"]
+    assert "Log message:" not in prompt

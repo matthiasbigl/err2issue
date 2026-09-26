@@ -24,6 +24,7 @@ everything marked stable.**
 │         **`TypeError`** in **checkout-api**                    │
 │         | table: first/last seen, service, version, trace |    │
 │         ### Summary        ← AI-written, or absent             │
+│         ### Log message    ← the record body, when it differs  │
 │         ### Exception                                          │
 │         ### Stack trace                                        │
 │         ### Correlated log lines                               │
@@ -84,12 +85,19 @@ freely by humans or agents.
 
 These headings are stable when present. Any may be absent — the stack trace
 section is missing for errors without a stack, `### Summary` is missing when AI
-enrichment is unconfigured or fell back.
+enrichment is unconfigured or fell back, and `### Log message` is missing when
+the record's body is empty or repeats the exception message.
+
+Fenced blocks use a fence longer than any backtick run in their content, so a
+message containing ```` ``` ```` cannot close the block early. Parse fences as
+CommonMark does (a closing fence at least as long as the opening one), not as a
+literal ```` ``` ````.
 
 | Heading | Contents |
 |---|---|
 | `### Summary` | Two or three sentences, AI-written |
-| `### Exception` | Fenced block: `Type: message` |
+| `### Log message` | Fenced block: the log record's body, verbatim. Present only when it says something `exception.message` does not |
+| `### Exception` | Fenced block: `Type: message`, or just `Type` when the message is empty |
 | `### Stack trace` | Fenced block, **top frame first** |
 | `### Correlated log lines (trace \`…\`)` | Fenced block, oldest first |
 | `<details><summary>Runtime attributes</summary>` | Markdown table of span attributes |

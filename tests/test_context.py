@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from err2issue import context as ctx
 from tests.conftest import PY_TRACE, make_event, make_log_line
 
@@ -232,3 +234,68 @@ def test_body_renders_first_seen_distinct_from_last_seen():
 def test_body_is_valid_markdown_without_stray_code_fences():
     body = ctx.build_body(make_event(stacktrace=PY_TRACE), "abc", "v1", "s")
     assert body.count("```") % 2 == 0, "unbalanced code fences would break rendering"
+
+
+# -- the log record body (a bare `str(exc)` must not hide the log line) -----
+
+SHIELDED = dict(
+    exception_type="ConnectionClosedError",
+    exception_message="None",
+    stacktrace=None,
+    body="ConnectionClosedError exception in shielded future",
+)
+
+
+def test_body_shows_the_log_message_next_to_the_exception():
+    body = ctx.build_body(make_event(**SHIELDED), "abc", "v2", "")
+    assert "### Log message" in body
+    assert "ConnectionClosedError exception in shielded future" in body
+    assert body.index("### Log message") < body.index("### Exception")
+
+
+def test_body_omits_a_log_message_that_repeats_the_exception():
+    event = make_event(exception_message="db down", body="db down")
+    assert "### Log message" not in ctx.build_body(event, "abc", "v2", "")
+
+
+def test_body_omits_the_log_message_when_there_is_none():
+    assert "### Log message" not in ctx.build_body(make_event(body=None), "abc", "v2", "")
+
+
+def test_empty_exception_message_renders_without_a_dangling_colon():
+    body = ctx.build_body(make_event(exception_message="", body="x"), "abc", "v2", "")
+    assert "```\nTypeError\n```" in body
+
+
+def test_occurrence_comment_carries_the_log_message():
+    comment = ctx.build_occurrence_comment(make_event(**SHIELDED), count=2)
+    assert "> ConnectionClosedError exception in shielded future" in comment
+
+
+@pytest.mark.parametrize("placeholder", ["None", "null", "", "  ", "undefined", "TypeError"])
+def test_placeholder_messages_are_uninformative(placeholder):
+    assert ctx.is_uninformative(placeholder, "TypeError")
+
+
+def test_a_real_message_is_informative():
+    assert not ctx.is_uninformative("None of the replicas answered", "TypeError")
+
+
+def test_fallback_title_uses_the_log_message_when_the_exception_says_nothing():
+    summary = ctx.fallback_summary(make_event(**SHIELDED))
+    assert summary == "ConnectionClosedError exception in shielded future"
+
+
+def test_fallback_title_prefixes_the_type_when_the_log_line_omits_it():
+    event = make_event(**{**SHIELDED, "body": "lost upstream during checkout"})
+    assert ctx.fallback_summary(event) == "ConnectionClosedError: lost upstream during checkout"
+
+
+def test_fallback_title_prefers_an_informative_exception_message():
+    event = make_event(exception_message="cart is empty", body="checkout failed")
+    assert ctx.fallback_summary(event) == "TypeError: cart is empty"
+
+
+def test_fence_survives_backticks_in_the_content():
+    fenced = ctx.fence("before\n```\ninjected\n```\nafter")
+    assert fenced.startswith("````\n") and fenced.endswith("\n````")

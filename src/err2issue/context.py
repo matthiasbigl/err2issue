@@ -77,6 +77,57 @@ def truncate(text: str | None, limit: int) -> str:
     return text[:limit] + f"\n... [truncated, {len(text) - limit} more characters]"
 
 
+# `str(exc)` of an exception constructed without arguments — or with an
+# explicit `None` — renders as one of these. They carry no information, so
+# they must not become the title when a real log message is sitting next to them.
+_PLACEHOLDER_MESSAGES = {"", "none", "null", "nil", "undefined", "n/a", "(no message)"}
+
+
+def _one_line(text: str | None) -> str:
+    return " ".join((text or "").split())
+
+
+def is_uninformative(message: str | None, exception_type: str = "") -> bool:
+    """True for exception messages like `None`, `null`, or just the type name."""
+    flat = _one_line(message)
+    if flat.lower() in _PLACEHOLDER_MESSAGES:
+        return True
+    return bool(exception_type) and flat == exception_type
+
+
+def log_message(event: ErrorEvent) -> str:
+    """The log record's own body, when it says something the exception does not.
+
+    Instrumentation such as `logger.exception("... in shielded future")` puts the
+    most useful sentence in the record body and a bare `str(exc)` — often `None`
+    — in `exception.message`. Returns "" when the body is absent or merely
+    repeats the exception message.
+    """
+    body = (event.body or "").strip()
+    if not body:
+        return ""
+    flat_body = _one_line(body)
+    flat_message = _one_line(event.exception_message)
+    if flat_body == flat_message:
+        return ""
+    if flat_body in (event.exception_type, f"{event.exception_type}: {flat_message}"):
+        return ""
+    return body
+
+
+def fence(text: str) -> str:
+    """Wrap `text` in a code fence that its own backticks cannot close."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    marker = "`" * max(3, longest + 1)
+    return f"{marker}\n{text}\n{marker}"
+
+
+def _exception_line(event: ErrorEvent, limit: int) -> str:
+    if not (event.exception_message or "").strip():
+        return event.exception_type
+    return f"{event.exception_type}: {truncate(event.exception_message, limit)}"
+
+
 def _fmt_time(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -157,11 +208,16 @@ def build_body(
         parts.append(summary)
         parts.append("")
 
+    logged = log_message(event)
+    if logged:
+        parts.append("### Log message")
+        parts.append("")
+        parts.append(fence(truncate(logged, max_message_chars)))
+        parts.append("")
+
     parts.append("### Exception")
     parts.append("")
-    parts.append("```")
-    parts.append(f"{event.exception_type}: {truncate(event.exception_message, max_message_chars)}")
-    parts.append("```")
+    parts.append(fence(_exception_line(event, max_message_chars)))
     parts.append("")
 
     if event.stacktrace:
@@ -231,10 +287,13 @@ def build_occurrence_comment(
         parts.append(f"- **Trace** `{event.trace_id}`")
     parts.append("")
 
+    logged = log_message(event)
+    if logged:
+        parts.append(f"> {truncate(_one_line(logged), 500)}")
+        parts.append("")
+
     if event.exception_message:
-        parts.append("```")
-        parts.append(f"{event.exception_type}: {truncate(event.exception_message, 500)}")
-        parts.append("```")
+        parts.append(fence(_exception_line(event, 500)))
         parts.append("")
 
     lines = (correlated or [])[-max_log_lines:]
@@ -265,8 +324,17 @@ def fallback_summary(event: ErrorEvent, max_chars: int = 70) -> str:
 
     PLAN.md §5.3: the AI step is an enhancement, never a dependency.
     """
-    message = " ".join((event.exception_message or "").split())
-    first_line = message.split(". ")[0] if message else ""
-    if first_line:
-        return f"{event.exception_type}: {first_line}"[:max_chars].rstrip()
-    return f"{event.exception_type} in {event.service_name}"[:max_chars].rstrip()
+    exc_type = event.exception_type
+    message = _one_line(event.exception_message)
+    if not is_uninformative(message, exc_type):
+        first_line = message.split(". ")[0]
+        return f"{exc_type}: {first_line}"[:max_chars].rstrip()
+
+    # The exception says nothing (`ConnectionClosedError: None`); the log line
+    # that carried it usually does (`ConnectionClosedError exception in
+    # shielded future`). Use it, keeping the type visible exactly once.
+    logged = _one_line(log_message(event)).split(". ")[0]
+    if logged:
+        text = logged if exc_type in logged else f"{exc_type}: {logged}"
+        return text[:max_chars].rstrip()
+    return f"{exc_type} in {event.service_name}"[:max_chars].rstrip()

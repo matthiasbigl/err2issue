@@ -17,7 +17,7 @@ import json
 import logging
 from dataclasses import dataclass
 
-from .context import fallback_summary
+from .context import fallback_summary, log_message
 from .models import ErrorEvent
 
 log = logging.getLogger(__name__)
@@ -102,6 +102,11 @@ class Enricher:
             f"Exception type: {event.exception_type}",
             f"Message: {event.exception_message[:1500]}",
         ]
+        logged = log_message(event)
+        if logged:
+            # Often the only informative text when the exception message is
+            # empty or `None` — the log call site's own description of the failure.
+            parts.append(f"Log message: {logged[:1500]}")
         if event.stacktrace:
             parts.append(f"\nStack trace:\n{event.stacktrace[:4000]}")
         interesting = {
