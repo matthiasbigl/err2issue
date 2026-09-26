@@ -246,10 +246,13 @@ class GitHubClient:
         title: str | None = None,
         state: str | None = None,
         state_reason: str | None = None,
+        body: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {}
         if title is not None:
             payload["title"] = title
+        if body is not None:
+            payload["body"] = body
         if state is not None:
             payload["state"] = state
         if state_reason is not None:

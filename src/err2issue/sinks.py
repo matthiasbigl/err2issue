@@ -36,7 +36,11 @@ class Sink(ABC):
         repo: str,
         summary: str,
         correlated: list[LogLine] | None = None,
-    ) -> FiledIssue: ...
+        *,
+        description: str = "",
+    ) -> FiledIssue:
+        """File one error. `summary` becomes the title; `description` is the
+        optional AI-written `### Summary` section, omitted when empty."""
 
     async def aclose(self) -> None:
         return None
@@ -52,8 +56,12 @@ class GitHubSink(Sink):
     def __init__(self, filer: IssueFiler):
         self.filer = filer
 
-    async def deliver(self, event, fingerprint, repo, summary, correlated=None) -> FiledIssue:
-        return await self.filer.file(event, fingerprint, repo, summary, correlated)
+    async def deliver(
+        self, event, fingerprint, repo, summary, correlated=None, *, description: str = ""
+    ) -> FiledIssue:
+        return await self.filer.file(
+            event, fingerprint, repo, summary, correlated, description=description
+        )
 
     def health(self) -> dict:
         return self.filer.health()
@@ -88,12 +96,14 @@ class WorkflowDispatchSink(Sink):
         self.max_stacktrace_chars = max_stacktrace_chars
         self.max_log_lines = max_log_lines
 
-    async def deliver(self, event, fingerprint, repo, summary, correlated=None) -> FiledIssue:
+    async def deliver(
+        self, event, fingerprint, repo, summary, correlated=None, *, description: str = ""
+    ) -> FiledIssue:
         body = ctx.build_body(
             event=event,
             fingerprint=fingerprint,
             version=fp.VERSION,
-            summary=summary,
+            summary=description,
             count=1,
             correlated=correlated,
             max_message_chars=self.max_message_chars,
@@ -130,7 +140,9 @@ class DryRunSink(Sink):
         self.calls: list[dict] = []
         self._emit = emit or (lambda payload: log.info("dry-run: %s", json.dumps(payload)))
 
-    async def deliver(self, event, fingerprint, repo, summary, correlated=None) -> FiledIssue:
+    async def deliver(
+        self, event, fingerprint, repo, summary, correlated=None, *, description: str = ""
+    ) -> FiledIssue:
         payload = {
             "repo": repo,
             "fingerprint": f"{fp.VERSION}:{fingerprint}",

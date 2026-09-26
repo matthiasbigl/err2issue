@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -40,6 +41,66 @@ LABEL_COLOR = "B60205"
 CLAIM_RETRIES = 3
 CLAIM_BACKOFF_SECONDS = 0.4
 UNAVAILABLE_COOLDOWN_SECONDS = 900.0
+
+# GitHub rejects issue and comment bodies over 65,536 characters with a 422, so
+# one huge log line would otherwise mean the error is never filed at all.
+# Clip below the hard limit to leave room for the truncation note.
+BODY_LIMIT = 65_000
+TRUNCATION_NOTE = "_[truncated by err2issue]_"
+
+_LAST_SEEN_ROW = re.compile(r"^\| Last seen \|.*\|[ \t]*$", re.MULTILINE)
+_OCCURRENCES_ROW = re.compile(r"^\| Occurrences \|.*\|[ \t]*$", re.MULTILINE)
+_VERSION_ROW = re.compile(r"^\| Version \| (?P<value>.*?) \|[ \t]*$", re.MULTILINE)
+_LATEST_VERSION_ROW = re.compile(r"^\| Latest version \|.*\|[ \t]*\n?", re.MULTILINE)
+
+
+def _clip(body: str, limit: int = BODY_LIMIT) -> str:
+    """Keep a body under GitHub's size limit without breaking its markdown.
+
+    The machine header is the first line, so it always survives. If the cut
+    lands inside a fenced block, the fence is closed before the note so the
+    rest of the issue does not render as code.
+    """
+    if len(body) <= limit:
+        return body
+    note = f"\n\n{TRUNCATION_NOTE}\n"
+    fence = "\n```"
+    kept = body[: max(0, limit - len(note) - len(fence))]
+    kept = kept.rsplit("\n", 1)[0] if "\n" in kept else kept
+    open_fences = sum(1 for line in kept.split("\n") if line.startswith("```"))
+    if open_fences % 2:
+        kept += fence
+    return kept + note
+
+
+def _refresh_body(body: str, event: ErrorEvent, count: int) -> str | None:
+    """Patch the existing body for a new occurrence, preserving human edits.
+
+    Only the machine header and the rows err2issue owns are rewritten; the rest
+    of the body is left exactly as found. Returns None when there is no header
+    to anchor on, in which case the body is not touched at all.
+    """
+    match = ctx.HEADER_RE.search(body)
+    if match is None:
+        return None
+    header = ctx.machine_header(match.group("fp"), match.group("ver"), count)
+    body = body[: match.start()] + header + body[match.end() :]
+
+    last_seen = ctx._fmt_time(event.timestamp)
+    body = _LAST_SEEN_ROW.sub(lambda _: f"| Last seen | {last_seen} |", body, count=1)
+    body = _OCCURRENCES_ROW.sub(lambda _: f"| Occurrences | {count} |", body, count=1)
+
+    version = _VERSION_ROW.search(body) if event.service_version else None
+    if version is not None:
+        latest = f"`{event.service_version}`"
+        # Drop any previous "Latest version" row, then re-add it only if this
+        # occurrence runs a different version than the one first filed.
+        body = _LATEST_VERSION_ROW.sub("", body, count=1)
+        if version.group("value") != latest:
+            version = _VERSION_ROW.search(body)
+            row = f"| Latest version | {latest} |"
+            body = body[: version.end()] + "\n" + row + body[version.end() :]
+    return body
 
 
 class _CommentBudget:
@@ -108,7 +169,11 @@ class IssueFiler:
         repo: str,
         summary: str,
         correlated: list[LogLine] | None = None,
+        *,
+        description: str = "",
     ) -> FiledIssue:
+        """File one error. `summary` is the title stem; `description` is the
+        optional `### Summary` section, omitted when empty (e.g. AI fell back)."""
         cooling = self._cooling_down(repo)
         if cooling is not None:
             return FiledIssue(
@@ -119,7 +184,7 @@ class IssueFiler:
             )
 
         try:
-            result = await self._file(event, fingerprint, repo, summary, correlated)
+            result = await self._file(event, fingerprint, repo, summary, correlated, description)
         except RepoUnavailable as exc:
             self._mark_unavailable(repo, exc)
             return FiledIssue(action="skipped", fingerprint=fingerprint, repo=repo, detail=str(exc))
@@ -133,6 +198,7 @@ class IssueFiler:
         repo: str,
         summary: str,
         correlated: list[LogLine] | None,
+        description: str = "",
     ) -> FiledIssue:
         label = fp.label_for(fingerprint)
         existing = await self.client.list_issues_by_label(repo, label, state="all")
@@ -163,7 +229,7 @@ class IssueFiler:
                 repo,
             )
 
-        return await self._create(event, fingerprint, repo, summary, correlated, label)
+        return await self._create(event, fingerprint, repo, summary, correlated, label, description)
 
     # -- repository availability -------------------------------------------
     #
@@ -235,13 +301,14 @@ class IssueFiler:
         summary: str,
         correlated: list[LogLine] | None,
         label: str,
+        description: str = "",
     ) -> FiledIssue:
         title = ctx.format_title(1, summary)
         body = ctx.build_body(
             event=event,
             fingerprint=fingerprint,
             version=fp.VERSION,
-            summary=summary,
+            summary=description,
             count=1,
             correlated=correlated,
             max_message_chars=self.max_message_chars,
@@ -249,7 +316,7 @@ class IssueFiler:
             max_log_lines=self.max_log_lines,
         )
         labels = [*self.extra_labels, label]
-        issue = await self.client.create_issue(repo, title=title, body=body, labels=labels)
+        issue = await self.client.create_issue(repo, title=title, body=_clip(body), labels=labels)
         return FiledIssue(
             action="created",
             fingerprint=fingerprint,
@@ -279,27 +346,28 @@ class IssueFiler:
         was_closed = issue.get("state") == "closed"
         regression = was_closed and self.reopen_closed
 
+        # Refresh the body in the same PATCH as the title: one round-trip, and
+        # the header count, "Last seen" and "Occurrences" stay truthful.
+        refreshed = _refresh_body(issue["body"], event, new_count) if header else None
         await self.client.update_issue(
             repo,
             number,
             title=ctx.format_title(new_count, stem),
             state="open" if regression else None,
             state_reason="reopened" if regression else None,
+            body=_clip(refreshed) if refreshed is not None else None,
         )
 
         # A regression is always worth a comment; routine occurrences are budgeted.
         if regression or self._budget.allow(repo, number):
-            await self.client.add_comment(
-                repo,
-                number,
-                ctx.build_occurrence_comment(
-                    event,
-                    count=new_count,
-                    correlated=correlated,
-                    regression=regression,
-                    max_stacktrace_chars=self.max_stacktrace_chars,
-                ),
+            comment = ctx.build_occurrence_comment(
+                event,
+                count=new_count,
+                correlated=correlated,
+                regression=regression,
+                max_stacktrace_chars=self.max_stacktrace_chars,
             )
+            await self.client.add_comment(repo, number, _clip(comment))
 
         return FiledIssue(
             action="reopened" if regression else "commented",

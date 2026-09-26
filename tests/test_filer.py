@@ -7,6 +7,7 @@ these tests carry the most weight in the suite.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import httpx
 import respx
@@ -412,3 +413,181 @@ async def test_lookup_uses_the_versioned_fingerprint_label():
     params = listing.calls[0].request.url.params
     assert params["labels"] == f"err2issue-fp-v2-{FINGERPRINT}"
     assert params["state"] == "all"
+
+
+# -- summary vs description (A1) -------------------------------------------
+
+
+def _mock_create_path():
+    respx.get(f"{API}/repos/{REPO}/issues").mock(return_value=httpx.Response(200, json=[]))
+    respx.post(f"{API}/repos/{REPO}/labels").mock(return_value=httpx.Response(201, json={}))
+    return respx.post(f"{API}/repos/{REPO}/issues").mock(
+        return_value=httpx.Response(201, json=issue_payload())
+    )
+
+
+@respx.mock
+async def test_no_summary_section_when_there_is_no_description():
+    """The contract: `### Summary` is absent when enrichment fell back."""
+    create = _mock_create_path()
+    async with httpx.AsyncClient() as http:
+        await build_filer(http).file(make_event(), FINGERPRINT, REPO, "Cart total fails")
+    payload = body_of(create)
+    assert payload["title"] == "[x1] Cart total fails"
+    assert "### Summary" not in payload["body"]
+
+
+@respx.mock
+async def test_summary_section_carries_the_description_not_the_title():
+    create = _mock_create_path()
+    async with httpx.AsyncClient() as http:
+        await build_filer(http).file(
+            make_event(),
+            FINGERPRINT,
+            REPO,
+            "Cart total fails",
+            description="Prices can be null after the catalogue import.",
+        )
+    payload = body_of(create)
+    assert payload["title"] == "[x1] Cart total fails"
+    body = payload["body"]
+    assert "### Summary\n\nPrices can be null after the catalogue import." in body
+    assert "Cart total fails" not in body
+
+
+# -- body refresh on occurrence (A2) ---------------------------------------
+
+
+def _existing_body(count: int = 3, version: str = "1.4.2") -> str:
+    from err2issue import context as ctx
+
+    event = make_event(service_version=version, timestamp=datetime(2026, 7, 1, 9, 0, 0, tzinfo=UTC))
+    return ctx.build_body(event, FINGERPRINT, "v1", summary="", count=count)
+
+
+def _mock_occurrence(body: str | None):
+    respx.get(f"{API}/repos/{REPO}/issues").mock(
+        return_value=httpx.Response(
+            200, json=[issue_payload(number=7, title="[x3] TypeError in checkout", body=body)]
+        )
+    )
+    respx.post(f"{API}/repos/{REPO}/issues/7/comments").mock(
+        return_value=httpx.Response(201, json={})
+    )
+    return respx.patch(f"{API}/repos/{REPO}/issues/7").mock(
+        return_value=httpx.Response(200, json=issue_payload())
+    )
+
+
+@respx.mock
+async def test_occurrence_refreshes_header_and_rows_in_the_same_patch():
+    from err2issue.context import parse_header
+
+    patch = _mock_occurrence(_existing_body(count=3))
+    async with httpx.AsyncClient() as http:
+        await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
+
+    assert len(patch.calls) == 1, "title, state and body go in one round-trip"
+    payload = body_of(patch)
+    assert payload["title"] == "[x4] TypeError in checkout"
+    body = payload["body"]
+    # The issue keeps the version it was filed under; only the count moves.
+    assert parse_header(body) == {"fingerprint": FINGERPRINT, "version": "v1", "count": 4}
+    assert "| Last seen | 2026-07-28 12:00:00 UTC |" in body
+    assert "| Occurrences | 4 |" in body
+    assert "| First seen | 2026-07-01 09:00:00 UTC |" in body
+    assert "Latest version" not in body
+
+
+@respx.mock
+async def test_occurrence_body_refresh_preserves_human_edits():
+    edited = _existing_body().replace(
+        "### Exception", "Triage note: owned by payments.\n\n### Exception"
+    )
+    patch = _mock_occurrence(edited)
+    async with httpx.AsyncClient() as http:
+        await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
+    assert "Triage note: owned by payments." in body_of(patch)["body"]
+
+
+@respx.mock
+async def test_a_new_service_version_adds_a_latest_version_row():
+    patch = _mock_occurrence(_existing_body(version="1.4.2"))
+    async with httpx.AsyncClient() as http:
+        await build_filer(http).file(make_event(service_version="1.5.0"), FINGERPRINT, REPO, "s")
+    body = body_of(patch)["body"]
+    assert "| Version | `1.4.2` |\n| Latest version | `1.5.0` |" in body
+
+    # A later occurrence replaces the row rather than stacking another.
+    from err2issue.github.filer import _refresh_body
+
+    again = _refresh_body(body, make_event(service_version="1.6.0"), 5)
+    assert again.count("Latest version") == 1
+    assert "| Latest version | `1.6.0` |" in again
+
+
+@respx.mock
+async def test_body_without_a_header_is_not_patched():
+    patch = _mock_occurrence("A human rewrote this whole body.")
+    async with httpx.AsyncClient() as http:
+        await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
+    payload = body_of(patch)
+    assert "body" not in payload
+    assert payload["title"] == "[x4] TypeError in checkout"
+
+
+# -- body size cap (A3) ----------------------------------------------------
+
+
+@respx.mock
+async def test_a_huge_log_line_still_files_within_the_body_limit():
+    from err2issue.context import parse_header
+
+    create = _mock_create_path()
+    huge = make_log_line("x" * 100_000)
+    async with httpx.AsyncClient() as http:
+        result = await build_filer(http).file(
+            make_event(), FINGERPRINT, REPO, "s", correlated=[huge]
+        )
+    assert result.action == "created"
+    body = body_of(create)["body"]
+    assert len(body) <= 65_536
+    assert parse_header(body)["count"] == 1
+    assert "[truncated by err2issue]" in body
+    fences = [line for line in body.split("\n") if line.startswith("```")]
+    assert len(fences) % 2 == 0, "clipping must not leave a code fence open"
+
+
+def test_clip_leaves_short_bodies_alone():
+    from err2issue.github.filer import _clip
+
+    assert _clip("short") == "short"
+
+
+def test_clip_closes_an_open_fence():
+    from err2issue.github.filer import _clip
+
+    body = "header\n\n```\n" + "line\n" * 1000
+    clipped = _clip(body, limit=500)
+    assert len(clipped) <= 500
+    assert clipped.startswith("header")
+    fences = [line for line in clipped.split("\n") if line.startswith("```")]
+    assert len(fences) == 2
+
+
+@respx.mock
+async def test_occurrence_comments_are_clipped():
+    respx.get(f"{API}/repos/{REPO}/issues").mock(
+        return_value=httpx.Response(200, json=[issue_payload(number=7)])
+    )
+    respx.patch(f"{API}/repos/{REPO}/issues/7").mock(
+        return_value=httpx.Response(200, json=issue_payload())
+    )
+    comment = respx.post(f"{API}/repos/{REPO}/issues/7/comments").mock(
+        return_value=httpx.Response(201, json={})
+    )
+    async with httpx.AsyncClient() as http:
+        await build_filer(http, max_stacktrace_chars=200_000).file(
+            make_event(stacktrace="frame\n" * 30_000), FINGERPRINT, REPO, "s"
+        )
+    assert len(body_of(comment)["body"]) <= 65_536

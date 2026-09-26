@@ -163,3 +163,39 @@ async def test_github_sink_reports_filer_availability_state():
 
         filer._mark_unavailable(REPO, RepoUnavailable("issues disabled"))
         assert sink.health() == {"unavailable_repos": {REPO: 60.0}, "unavailable_events": 1}
+
+
+# -- description -----------------------------------------------------------
+
+
+@respx.mock
+async def test_workflow_sink_body_uses_the_description_for_the_summary():
+    route = respx.post(DISPATCH_URL).mock(return_value=httpx.Response(204))
+    async with httpx.AsyncClient() as http:
+        sink = WorkflowDispatchSink(build_client(http))
+        await sink.deliver(make_event(), "abc", REPO, "A title", description="Why it broke.")
+        await sink.deliver(make_event(), "abc", REPO, "A title")
+    with_description = json.loads(route.calls[0].request.content)["inputs"]
+    without = json.loads(route.calls[1].request.content)["inputs"]
+    assert with_description["title"] == "[x1] A title"
+    assert "### Summary\n\nWhy it broke." in with_description["context"]
+    assert "### Summary" not in without["context"]
+
+
+@respx.mock
+async def test_github_sink_passes_the_description_through():
+    respx.get(f"{API}/repos/{REPO}/issues").mock(return_value=httpx.Response(200, json=[]))
+    respx.post(f"{API}/repos/{REPO}/labels").mock(return_value=httpx.Response(201, json={}))
+    create = respx.post(f"{API}/repos/{REPO}/issues").mock(
+        return_value=httpx.Response(201, json=issue_payload(number=3))
+    )
+    async with httpx.AsyncClient() as http:
+        sink = GitHubSink(IssueFiler(build_client(http), sleep=no_sleep))
+        await sink.deliver(make_event(), "abc123def456", REPO, "t", description="Why.")
+    assert "### Summary\n\nWhy." in json.loads(create.calls[0].request.content)["body"]
+
+
+async def test_dry_run_accepts_a_description():
+    sink = DryRunSink()
+    result = await sink.deliver(make_event(), "abc", REPO, "A title", description="d")
+    assert result.action == "dry-run"

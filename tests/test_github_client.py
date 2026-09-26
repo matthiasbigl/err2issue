@@ -287,3 +287,15 @@ async def test_workflow_dispatch_posts_ref_and_inputs():
     body = _json.loads(route.calls[0].request.content)
     assert body["ref"] == "main"
     assert body["inputs"]["fingerprint"] == "abc"
+
+
+@respx.mock
+async def test_update_issue_can_send_a_body():
+    import json as _json
+
+    route = respx.patch(f"{API}/repos/acme/api/issues/7").mock(
+        return_value=httpx.Response(200, json=issue_payload())
+    )
+    async with httpx.AsyncClient() as http:
+        await build_client(http).update_issue("acme/api", 7, title="t", body="new body")
+    assert _json.loads(route.calls[0].request.content) == {"title": "t", "body": "new body"}
