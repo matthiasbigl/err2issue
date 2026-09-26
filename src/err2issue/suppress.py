@@ -15,6 +15,7 @@ Three independent limits, checked in order:
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import OrderedDict
@@ -24,11 +25,16 @@ from dataclasses import dataclass
 # cannot grow it without limit.
 MAX_TRACKED_FINGERPRINTS = 10_000
 
+log = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class Decision:
     allowed: bool
     reason: str = ""
+    # Stable, low-cardinality name for the limit that fired — "window", "rate"
+    # or "budget". `reason` is for humans and carries per-call numbers.
+    kind: str = ""
 
     def __bool__(self) -> bool:
         return self.allowed
@@ -58,6 +64,7 @@ class Suppressor:
         self._bucket = float(max_per_minute)
         self._bucket_updated = clock()
         self._new_today = 0
+        self._dropped_new_today = 0
         self._day = self._current_day()
 
     def _current_day(self) -> int:
@@ -77,6 +84,7 @@ class Suppressor:
         if today != self._day:
             self._day = today
             self._new_today = 0
+            self._dropped_new_today = 0
 
     def check(self, fingerprint: str) -> Decision:
         """Decide whether this occurrence should be filed. Consumes budget when allowed."""
@@ -87,19 +95,34 @@ class Suppressor:
             last = self._last_seen.get(fingerprint)
             if last is not None and (now - last) < self.window_seconds:
                 remaining = int(self.window_seconds - (now - last))
-                return Decision(False, f"within suppression window ({remaining}s remaining)")
+                return Decision(
+                    False, f"within suppression window ({remaining}s remaining)", "window"
+                )
 
             is_new = fingerprint not in self._known
             if is_new and self._new_today >= self.max_new_per_day:
+                self._dropped_new_today += 1
+                if self._dropped_new_today == 1:
+                    # Once per day, loudly: from here until the UTC day rolls
+                    # over, every *new* error is dropped, which is otherwise
+                    # invisible at the default log level.
+                    log.warning(
+                        "daily new-fingerprint budget exhausted (%d/%d): new distinct "
+                        "errors are dropped until 00:00 UTC; known errors still file. "
+                        "A bad deploy is the usual cause.",
+                        self._new_today,
+                        self.max_new_per_day,
+                    )
                 return Decision(
                     False,
                     f"daily new-fingerprint budget exhausted "
                     f"({self._new_today}/{self.max_new_per_day})",
+                    "budget",
                 )
 
             self._refill(now)
             if self._bucket < 1.0:
-                return Decision(False, f"global rate cap ({self.max_per_minute}/min)")
+                return Decision(False, f"global rate cap ({self.max_per_minute}/min)", "rate")
 
             self._bucket -= 1.0
             self._last_seen[fingerprint] = now
@@ -122,5 +145,6 @@ class Suppressor:
                 "tracked_fingerprints": len(self._last_seen),
                 "known_fingerprints": len(self._known),
                 "new_today": self._new_today,
+                "new_dropped_today": self._dropped_new_today,
                 "tokens_available": round(self._bucket, 2),
             }

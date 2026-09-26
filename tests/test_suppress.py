@@ -149,3 +149,42 @@ def test_decision_is_truthy_and_falsy(clock):
     suppressor = build(clock)
     assert bool(suppressor.check("aaa")) is True
     assert bool(suppressor.check("aaa")) is False
+
+
+# -- reason kinds and budget visibility ------------------------------------
+
+
+def test_every_denial_names_a_stable_kind(clock):
+    suppressor = build(clock, max_per_minute=1, max_new_per_day=2)
+    assert suppressor.check("a")
+    assert suppressor.check("a").kind == "window"
+    assert suppressor.check("b").kind == "rate"
+    clock.advance(60)
+    assert suppressor.check("b")
+    clock.advance(60)
+    assert suppressor.check("c").kind == "budget"
+
+
+def test_budget_exhaustion_is_logged_once_per_day(caplog):
+    day = [0.0]
+    suppressor = Suppressor(
+        window_seconds=600,
+        max_per_minute=1000,
+        max_new_per_day=1,
+        clock=FakeClock(),
+        wall_clock=lambda: day[0],
+    )
+    assert suppressor.check("first")
+    with caplog.at_level("WARNING", logger="err2issue.suppress"):
+        for name in ("x", "y", "z"):
+            assert not suppressor.check(name)
+    assert len([r for r in caplog.records if "budget exhausted" in r.message]) == 1
+    assert suppressor.stats()["new_dropped_today"] == 3
+
+    caplog.clear()
+    day[0] = 86_400.0
+    assert suppressor.check("second")
+    with caplog.at_level("WARNING", logger="err2issue.suppress"):
+        assert not suppressor.check("third")
+    assert len([r for r in caplog.records if "budget exhausted" in r.message]) == 1
+    assert suppressor.stats()["new_dropped_today"] == 1
