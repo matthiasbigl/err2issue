@@ -33,11 +33,26 @@ from datetime import UTC, datetime
 from .. import context as ctx
 from .. import fingerprint as fp
 from ..models import ErrorEvent, FiledIssue, LogLine
-from .client import GitHubClient, RepoUnavailable
+from .client import GitHubClient, GitHubError, RepoUnavailable
 
 log = logging.getLogger(__name__)
 
 LABEL_COLOR = "B60205"
+# Colour and description for the extra labels (`err2issue` by default). Without
+# this GitHub auto-creates them on first use, grey and undescribed.
+EXTRA_LABEL_COLOR = "D93F0B"
+EXTRA_LABEL_DESCRIPTION = "Filed automatically by err2issue from an error in telemetry"
+
+# How a human closed the issue. `completed` means "fixed", so a recurrence is a
+# regression. `not_planned` and `duplicate` mean "we decided not to track this
+# here" — reopening on every recurrence overrides that decision, repeatedly.
+DECLINED_STATE_REASONS = frozenset({"not_planned", "duplicate"})
+
+# Comment failures that must not undo an occurrence whose PATCH already landed:
+# 403 on a locked conversation (for credentials without collaborator rights),
+# 422 on some locked/limited issues, 404/410 when the issue was deleted or
+# transferred between the lookup and the comment.
+TOLERATED_COMMENT_STATUS = frozenset({403, 404, 410, 422})
 CLAIM_RETRIES = 3
 CLAIM_BACKOFF_SECONDS = 0.4
 UNAVAILABLE_COOLDOWN_SECONDS = 900.0
@@ -158,11 +173,17 @@ class IssueFiler:
         unavailable_cooldown_seconds: float = UNAVAILABLE_COOLDOWN_SECONDS,
         clock=time.monotonic,
         trace_url_template: str = "",
+        reopen_not_planned: bool = False,
+        assignees: list[str] | None = None,
     ):
         self.client = client
         self.trace_url_template = trace_url_template
         self.extra_labels = extra_labels or ["err2issue"]
         self.reopen_closed = reopen_closed
+        self.reopen_not_planned = reopen_not_planned
+        self.assignees = list(assignees or [])
+        # Repos whose extra labels have been given a colour this process.
+        self._styled_repos: set[str] = set()
         self.max_message_chars = max_message_chars
         self.max_stacktrace_chars = max_stacktrace_chars
         self.max_log_lines = max_log_lines
@@ -300,10 +321,41 @@ class IssueFiler:
 
     @staticmethod
     def _pick(issues: list[dict]) -> dict:
-        """Prefer an open issue; otherwise the most recently updated closed one."""
+        """Prefer an open issue; otherwise the most recently updated closed one.
+
+        More than one issue per fingerprint label should not happen — it means a
+        human copied the label, or the label-mutex race lost. Filing continues
+        on the best candidate, but somebody should merge them, so say so.
+        """
         open_issues = [i for i in issues if i.get("state") == "open"]
         pool = open_issues or issues
-        return max(pool, key=lambda i: i.get("updated_at") or "")
+        chosen = max(pool, key=lambda i: (i.get("updated_at") or "", i.get("number") or 0))
+        if len(issues) > 1:
+            log.warning(
+                "%d issues carry the same fingerprint label (%s); recording on #%s",
+                len(issues),
+                ", ".join(f"#{i.get('number')}" for i in issues),
+                chosen.get("number"),
+            )
+        return chosen
+
+    async def _style_extra_labels(self, repo: str) -> None:
+        """Create the extra labels with a colour and description, once per repo.
+
+        Best effort: 422 means the label already exists (possibly restyled by a
+        human, which we leave alone), and any other failure just means GitHub
+        auto-creates it grey when the issue is filed.
+        """
+        if repo in self._styled_repos:
+            return
+        self._styled_repos.add(repo)
+        for name in self.extra_labels:
+            try:
+                await self.client.create_label(
+                    repo, name, color=EXTRA_LABEL_COLOR, description=EXTRA_LABEL_DESCRIPTION
+                )
+            except GitHubError as exc:
+                log.debug("could not pre-create label %r on %s: %s", name, repo, exc)
 
     async def _create(
         self,
@@ -329,7 +381,25 @@ class IssueFiler:
             trace_url_template=self.trace_url_template,
         )
         labels = [*self.extra_labels, label]
-        issue = await self.client.create_issue(repo, title=title, body=_clip(body), labels=labels)
+        await self._style_extra_labels(repo)
+        body = _clip(body)
+        try:
+            issue = await self.client.create_issue(
+                repo, title=title, body=body, labels=labels, assignees=self.assignees
+            )
+        except GitHubError as exc:
+            # An assignee who is not a collaborator makes GitHub reject the
+            # whole issue with 422. Losing the error over a stale login in
+            # config would be absurd, so file it unassigned and say why.
+            if not self.assignees or exc.status != 422:
+                raise
+            log.warning(
+                "creating the issue on %s with assignees %s failed (%s); filing unassigned",
+                repo,
+                self.assignees,
+                exc,
+            )
+            issue = await self.client.create_issue(repo, title=title, body=body, labels=labels)
         return FiledIssue(
             action="created",
             fingerprint=fingerprint,
@@ -357,7 +427,13 @@ class IssueFiler:
         new_count = max(title_count, header_count) + 1
 
         was_closed = issue.get("state") == "closed"
+        declined = was_closed and issue.get("state_reason") in DECLINED_STATE_REASONS
         regression = was_closed and self.reopen_closed
+        if declined and not self.reopen_not_planned:
+            # A human closed this as "not planned" or "duplicate". Keep the
+            # count truthful (title, header, budgeted comment) but leave the
+            # decision to close it standing.
+            regression = False
 
         # Refresh the body in the same PATCH as the title: one round-trip, and
         # the header count, "Last seen" and "Occurrences" stay truthful.
@@ -372,6 +448,9 @@ class IssueFiler:
         )
 
         # A regression is always worth a comment; routine occurrences are budgeted.
+        detail = ""
+        if declined and not regression:
+            detail = f"closed as {issue.get('state_reason')}; not reopened"
         if regression or self._budget.allow(repo, number):
             comment = ctx.build_occurrence_comment(
                 event,
@@ -381,7 +460,22 @@ class IssueFiler:
                 max_stacktrace_chars=self.max_stacktrace_chars,
                 trace_url_template=self.trace_url_template,
             )
-            await self.client.add_comment(repo, number, _clip(comment))
+            try:
+                await self.client.add_comment(repo, number, _clip(comment))
+            except GitHubError as exc:
+                # The PATCH above already recorded the occurrence (and any
+                # reopen). Raising now would count a success as a failure and
+                # hide the issue number, so degrade to "count only".
+                if exc.status not in TOLERATED_COMMENT_STATUS:
+                    raise
+                log.warning(
+                    "occurrence recorded on %s#%s but the comment was refused "
+                    "(locked or gone?): %s",
+                    repo,
+                    number,
+                    exc,
+                )
+                detail = f"comment refused ({exc.status}); count updated"
 
         return FiledIssue(
             action="reopened" if regression else "commented",
@@ -390,6 +484,7 @@ class IssueFiler:
             number=number,
             url=issue.get("html_url"),
             count=new_count,
+            detail=detail,
         )
 
 

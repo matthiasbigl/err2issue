@@ -5,6 +5,8 @@ Everything is prefixed `E2I_`. See .env.example for a documented template.
 
 from __future__ import annotations
 
+import re
+
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -54,6 +56,13 @@ class Settings(BaseSettings):
     """Extra labels applied to every created issue, comma-separated."""
     reopen_closed: bool = True
     """Reopen a closed issue when its error recurs (regression detection)."""
+    reopen_not_planned: bool = False
+    """Also reopen issues a human closed as "not planned" or "duplicate". Off by
+    default: that close is a decision, not a fix, and reopening it on every
+    recurrence overrides it. The count and comments still update."""
+    issue_assignees: str = ""
+    """GitHub logins assigned to newly created issues, comma-separated. Empty:
+    none. An unassignable login files the issue unassigned rather than failing."""
     max_comment_per_issue_per_hour: int = 4
     """Cap occurrence comments so a long-running error does not spam one issue."""
     repo_unavailable_cooldown_seconds: int = 900
@@ -113,6 +122,10 @@ class Settings(BaseSettings):
     @property
     def extra_labels(self) -> list[str]:
         return [x.strip() for x in self.issue_labels.split(",") if x.strip()]
+
+    @property
+    def assignees(self) -> list[str]:
+        return [x.strip().lstrip("@") for x in self.issue_assignees.split(",") if x.strip()]
 
     @property
     def redact_patterns(self) -> list[str]:
@@ -184,13 +197,22 @@ class Settings(BaseSettings):
         # Compile custom redaction patterns now — a bad regex must not be
         # discovered mid-pipeline, where the failure would look like data loss.
         if self.redact and self.redact_patterns:
-            import re
-
             for pattern in self.redact_patterns:
                 try:
                     re.compile(pattern)
                 except re.error as exc:
                     problems.append(f"E2I_REDACT_EXTRA_PATTERNS entry {pattern!r} invalid: {exc}")
+
+        # GitHub logins: alphanumerics and single inner hyphens, at most 39
+        # characters. GitHub caps an issue at 10 assignees and 422s beyond it.
+        login = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
+        for name in self.assignees:
+            if not login.match(name):
+                problems.append(f"E2I_ISSUE_ASSIGNEES entry {name!r} is not a GitHub login")
+        if len(self.assignees) > 10:
+            problems.append(
+                f"E2I_ISSUE_ASSIGNEES lists {len(self.assignees)} logins; GitHub allows 10"
+            )
 
         if (
             self.workflow_file

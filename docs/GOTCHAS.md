@@ -33,6 +33,29 @@ Referenced from [AGENTS.md](../AGENTS.md), which is the file to read first.
   a permissions failure and retrying just burns quota.
 - Secondary rate limits: **80 content-creating requests/minute, 500/hour**,
   shared with the web UI.
+- **`x-ratelimit-reset` is the *primary* window, not the secondary one.** On a
+  secondary-limit 403 without `retry-after`, `remaining` is still in the
+  thousands and `reset` can be an hour out or already past; sleeping until it
+  either stalls the worker or retries straight back into the limit (which
+  extends the block). Use reset only when `remaining` is `0`; otherwise wait
+  GitHub's documented minute.
+- **`state: closed` is not one thing.** `state_reason` is `completed`,
+  `not_planned` or `duplicate`. Only `completed` means "fixed"; reopening the
+  other two on every recurrence fights a human's decision, so they are left
+  closed unless `E2I_REOPEN_NOT_PLANNED` is set.
+- **An App token can be dead long before its `expires_at`.** Revoked,
+  suspended, or the App reinstalled under a new installation id. The cache
+  would hand it out for up to an hour of 401s, so a 401 invalidates the cached
+  token *and* installation id and retries once. A PAT 401 is not retried.
+- **A comment can fail after the PATCH succeeded.** Locked conversations
+  refuse comments (403/422) for credentials without collaborator rights. The
+  count update already landed, so treat that as a degraded success, not a
+  failure — raising would re-file nothing and hide the issue number.
+- **Labels named in `POST /issues` are auto-created grey with no
+  description.** Pre-create the extra labels once per repo; a 422 means a
+  human already made (and maybe restyled) it, so leave it alone.
+- **An unassignable login 422s the whole `POST /issues`.** Retry without
+  `assignees` rather than lose the error over a stale config entry.
 - `workflow_dispatch` returns **204 with no body** — no run id, no issue number.
   Anything downstream of it is unobservable.
 - **Push protection blocks realistic secret fixtures.** A test token has to look

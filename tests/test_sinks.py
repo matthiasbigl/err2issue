@@ -154,6 +154,37 @@ def test_extra_labels_are_parsed_from_settings():
     assert settings.extra_labels == ["err2issue", "production", "triage"]
 
 
+def test_not_planned_issues_are_not_reopened_by_default():
+    assert Settings().reopen_not_planned is False
+
+
+def test_assignees_are_parsed_and_passed_to_the_filer():
+    settings = Settings(
+        sink="github",
+        github_token="t",
+        github_repo="a/b",
+        issue_assignees=" @octocat, hubot ",
+        reopen_not_planned=True,
+    )
+    assert settings.assignees == ["octocat", "hubot"]
+    assert settings.validation_errors() == []
+    sink = build_sink(settings, client=GitHubClient(API, StaticTokenProvider("t")))
+    assert sink.filer.assignees == ["octocat", "hubot"]
+    assert sink.filer.reopen_not_planned is True
+
+
+@pytest.mark.parametrize("bad", ["-lead", "trail-", "dou--ble", "has space", "a" * 40, "x/y"])
+def test_invalid_assignee_logins_fail_fast(bad):
+    settings = Settings(github_token="t", github_repo="a/b", issue_assignees=bad)
+    assert any("E2I_ISSUE_ASSIGNEES" in p for p in settings.validation_errors())
+
+
+def test_more_than_ten_assignees_fail_fast():
+    logins = ",".join(f"user{i}" for i in range(11))
+    settings = Settings(github_token="t", github_repo="a/b", issue_assignees=logins)
+    assert any("allows 10" in p for p in settings.validation_errors())
+
+
 async def test_github_sink_reports_filer_availability_state():
     """/metrics and /stats read repository availability through the sink."""
     async with httpx.AsyncClient() as http:

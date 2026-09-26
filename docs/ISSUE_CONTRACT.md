@@ -144,6 +144,7 @@ stateDiagram-v2
     Open --> Open: recurrence
     Open --> Closed: closed
     Closed --> Open: regression
+    Closed --> Closed: recurrence after a not planned close
     Closed --> [*]: never recurs
 ```
 
@@ -160,6 +161,23 @@ Regression comments are never suppressed by the budget.
 This is why closing an err2issue issue is meaningful: if the error comes back,
 the same issue reopens. **That reopen is the signal that a fix did not hold**,
 and it is the single most useful thing this format gives you.
+
+**Closed as not planned.** An issue closed with `state_reason: not_planned` or
+`duplicate` is a decision, not a fix, so a recurrence does **not** reopen it by
+default. It is treated as a routine occurrence instead: `[xN]` and the header
+count still rise, and a budgeted `### Occurrence #N` comment is added, but the
+issue stays closed. Set `E2I_REOPEN_NOT_PLANNED=true` to reopen these too. To
+stop the count moving as well, remove the fingerprint label — the next
+occurrence then files a fresh issue.
+
+**Comment refused.** If the occurrence comment is refused (403/422 on a locked
+conversation, 404/410 if the issue vanished mid-filing) the title and header
+update still stands, and the filing is reported as `commented` with a note in
+`detail` rather than as a failure.
+
+**Several issues on one label.** Should a human copy a fingerprint label onto a
+second issue, the open one wins; among closed ones, the most recently updated.
+err2issue logs a warning naming every candidate so they can be merged.
 
 ## Consuming
 

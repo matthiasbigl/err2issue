@@ -182,6 +182,8 @@ def build_sink(settings, client: GitHubClient | None) -> Sink:
             client,
             extra_labels=settings.extra_labels,
             reopen_closed=settings.reopen_closed,
+            reopen_not_planned=settings.reopen_not_planned,
+            assignees=settings.assignees,
             max_comments_per_issue_per_hour=settings.max_comment_per_issue_per_hour,
             max_message_chars=settings.max_message_chars,
             max_stacktrace_chars=settings.max_stacktrace_chars,
