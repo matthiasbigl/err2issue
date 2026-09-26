@@ -283,6 +283,11 @@ def _glance_rows(event: ErrorEvent) -> list[tuple[str, str]]:
             location = f"{location} in {function}" if location else function
         rows.append(("Location", _cell(truncate(location, 300))))
 
+    # The instrumentation scope: for logging bridges this is the logger name
+    # (`app.payments.client`), which often says which subsystem failed.
+    if event.logger_name:
+        rows.append(("Logger", _cell(truncate(event.logger_name, 200))))
+
     method = _attr(event, "http.request.method", "http.method")
     route = _attr(event, "http.route", "url.path", "http.target")
     status = _attr(event, "http.response.status_code", "http.status_code")

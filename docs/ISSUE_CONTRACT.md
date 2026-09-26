@@ -131,6 +131,7 @@ older semantic-convention names both resolve:
 | Host | `k8s.pod.name`, `host.name`, plus `(ns k8s.namespace.name)` |
 | Location | `code.file.path`/`code.filepath`, `:code.line.number`/`code.lineno`, `in code.function.name`/`code.function` |
 | Request | `http.request.method`/`http.method`, `http.route`/`url.path`/`http.target`, `→ http.response.status_code`/`http.status_code` |
+| Logger | the instrumentation scope name (the logger name, for logging bridges) |
 | Escaped | `yes (unhandled)` when `exception.escaped` is `true` |
 
 Occurrence comments repeat Environment and Host as bullets. Attacker-influenced

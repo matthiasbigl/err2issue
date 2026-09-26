@@ -137,6 +137,7 @@ class Enricher:
             f"Service: {event.service_name}",
             f"Version: {event.service_version or 'unknown'}",
             f"Severity: {event.severity}",
+            f"Logger: {(event.logger_name or 'unknown')[:200]}",
             f"Exception type: {event.exception_type}",
             f"Message: {event.exception_message[:1500]}",
         ]

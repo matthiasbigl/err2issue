@@ -608,3 +608,12 @@ def test_body_sanitises_the_summary_it_is_given():
     body = ctx.build_body(make_event(), "ab" * 6, "v2", "Ask @alice about it.")
     assert "`@alice`" in body
     assert "Ask @alice" not in body
+
+
+def test_logger_row_shows_the_instrumentation_scope():
+    body = ctx.build_body(make_event(logger_name="app.payments.client"), "abc", "v2", "")
+    assert "| Logger | `app.payments.client` |" in body
+
+
+def test_logger_row_is_absent_without_a_scope_name():
+    assert "| Logger |" not in ctx.build_body(make_event(), "abc", "v2", "")
