@@ -47,6 +47,12 @@ strict: true
 
 timeout-minutes: 20
 
+# One slot per error issue, whether the run came from an issue event or a
+# manual dispatch. Without a discriminator every dispatch shares one
+# concurrency group, and `gh aw compile` warns (v0.89+).
+concurrency:
+  job-discriminator: ${{ github.event.issue.number || inputs.issue_number || github.run_id }}
+
 # Hard cost ceilings, in AI Credits. gh-aw's own default daily cap is 5000 AIC
 # (~$50); these are deliberately lower, because one bug fix is not a research
 # project. Raise them once you have seen real runs in `gh aw logs`.

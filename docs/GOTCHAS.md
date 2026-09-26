@@ -220,7 +220,16 @@ Referenced from [AGENTS.md](../AGENTS.md), which is the file to read first.
 ### GitHub Agentic Workflows (gh-aw)
 
 Only relevant when changing `integrations/gh-aw/`. All of these were confirmed
-against gh-aw v0.83.4 by compiling, not by reading documentation.
+against gh-aw v0.83.4 by compiling, not by reading documentation, and re-checked
+on v0.89.21.
+
+- **CI installs the latest gh-aw, so a new release can turn `main` red with no
+  change here.** That is on purpose: consumers install the latest too. v0.89
+  did it twice at once: it added a warning for a `workflow_dispatch` workflow
+  without `concurrency.job-discriminator`, and it reworded the summary line
+  from `0 error(s), 0 warning(s)` to `N succeeded, 0 warnings`. The CI check
+  accepts both wordings; reproduce locally with the release binary
+  (`https://github.com/github/gh-aw/releases/download/<tag>/linux-amd64`).
 
 - **`gh aw compile` is a validator, so use it as one.** Unknown frontmatter
   keys, wrong value types, and correct keys at the wrong nesting level all fail

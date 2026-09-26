@@ -210,9 +210,11 @@ jobs:
           # and they matter: a missing toolset permission compiles cleanly and
           # then fails at run time for whoever installed it. So assert the
           # summary line exactly rather than grepping for the word "warning" —
-          # the success line is "0 error(s), 0 warning(s)" and contains both.
+          # the success line contains both words. Its wording changed in v0.89:
+          #   <= v0.88  "... 0 error(s), 0 warning(s)"
+          #   >= v0.89  "Compiled N workflow(s): N succeeded, 0 warnings"
           "$AW" compile 2>&1 | tee compile.log
-          if ! grep -qE '0 error\(s\), 0 warning\(s\)' compile.log; then
+          if ! grep -qE '0 error\(s\), 0 warning\(s\)|: [0-9]+ succeeded, 0 warnings$' compile.log; then
             echo "::error::gh aw compile did not finish clean — see the log above"
             exit 1
           fi

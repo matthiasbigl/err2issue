@@ -237,8 +237,8 @@ that goes with it — is [ORGANIZATIONS.md](ORGANIZATIONS.md).
 
 ## Verification status
 
-**Compiled clean**: `gh aw compile` on gh-aw **v0.83.4** reports
-`0 error(s), 0 warning(s)`, and err2issue's own CI compiles this file on every
+**Compiled clean**: `gh aw compile` on gh-aw **v0.89.21** reports
+`1 succeeded, 0 warnings`, and err2issue's own CI compiles this file on every
 run, so it cannot drift into being broken without the build going red.
 
 That check is worth having because the compiler is a real validator, not a YAML
