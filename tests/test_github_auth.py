@@ -182,6 +182,56 @@ async def test_different_repos_can_resolve_to_different_installations(rsa_key):
         assert await provider.token_for("other/b") == "tok2"
 
 
+# -- invalidation after a 401 ------------------------------------------------
+
+
+def test_a_pat_cannot_be_refreshed():
+    assert StaticTokenProvider("t").invalidate("acme/api") is False
+
+
+@respx.mock
+async def test_invalidating_re_resolves_the_installation_and_re_mints(rsa_key):
+    """A reinstalled App gets a new installation id; the old one would 404 forever."""
+    lookup = respx.get(f"{API}/repos/acme/api/installation").mock(
+        side_effect=[
+            httpx.Response(200, json={"id": 1}),
+            httpx.Response(200, json={"id": 2}),
+        ]
+    )
+    respx.post(f"{API}/app/installations/1/access_tokens").mock(
+        return_value=httpx.Response(
+            201, json={"token": "old", "expires_at": "2099-01-01T00:00:00Z"}
+        )
+    )
+    respx.post(f"{API}/app/installations/2/access_tokens").mock(
+        return_value=httpx.Response(
+            201, json={"token": "new", "expires_at": "2099-01-01T00:00:00Z"}
+        )
+    )
+    async with httpx.AsyncClient() as client:
+        provider = AppTokenProvider("123", rsa_key, API, client=client)
+        assert await provider.token_for("acme/api") == "old"
+        assert provider.invalidate("acme/api") is True
+        assert await provider.token_for("acme/api") == "new"
+    assert lookup.call_count == 2
+
+
+@respx.mock
+async def test_invalidating_with_a_fixed_installation_re_mints_the_token(rsa_key):
+    mint = respx.post(f"{API}/app/installations/42/access_tokens").mock(
+        side_effect=[
+            httpx.Response(201, json={"token": "a", "expires_at": "2099-01-01T00:00:00Z"}),
+            httpx.Response(201, json={"token": "b", "expires_at": "2099-01-01T00:00:00Z"}),
+        ]
+    )
+    async with httpx.AsyncClient() as client:
+        provider = AppTokenProvider("123", rsa_key, API, installation_id=42, client=client)
+        assert await provider.token_for("acme/api") == "a"
+        provider.invalidate("acme/api")
+        assert await provider.token_for("acme/api") == "b"
+    assert mint.call_count == 2
+
+
 # -- selection -------------------------------------------------------------
 
 

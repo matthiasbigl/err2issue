@@ -41,6 +41,14 @@ class TokenProvider(ABC):
     async def headers_for(self, repo: str) -> dict[str, str]:
         return {"Authorization": f"{self.scheme} {await self.token_for(repo)}"}
 
+    def invalidate(self, repo: str) -> bool:
+        """Forget cached credentials for `repo` after a 401.
+
+        Returns True if a retry could get a different token. A static PAT
+        cannot, so a 401 on it is surfaced immediately.
+        """
+        return False
+
     async def aclose(self) -> None:  # pragma: no cover - trivial
         return None
 
@@ -176,6 +184,17 @@ class AppTokenProvider(TokenProvider):
         token = payload["token"]
         self._tokens[installation_id] = _CachedToken(value=token, expires_at=expires_at)
         return token
+
+    def invalidate(self, repo: str) -> bool:
+        """Drop the cached token and installation id behind `repo`.
+
+        Both go: a revoked token needs re-minting, and a reinstalled App has a
+        new installation id, so the old one would just 404 on the next mint.
+        """
+        installation_id = self.fixed_installation_id or self._installations.pop(repo, None)
+        if installation_id is not None:
+            self._tokens.pop(installation_id, None)
+        return True
 
     async def aclose(self) -> None:
         if self._owns_client:

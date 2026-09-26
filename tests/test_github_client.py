@@ -175,6 +175,120 @@ async def test_primary_rate_limit_exhaustion_is_retried():
         assert await build_client(http).list_issues_by_label("acme/api", "lbl") == []
 
 
+def _rate_limited(headers: dict) -> httpx.Response:
+    return httpx.Response(
+        403, headers=headers, json={"message": "You have exceeded a secondary rate limit"}
+    )
+
+
+def test_secondary_limit_without_retry_after_waits_a_minute_not_the_primary_reset():
+    """`x-ratelimit-reset` is the primary window; it may be an hour out or past."""
+    import time
+
+    client = GitHubClient(API, StaticTokenProvider("t"))
+    far = str(int(time.time()) + 3000)
+    past = str(int(time.time()) - 10)
+    for reset in (far, past):
+        response = _rate_limited({"x-ratelimit-remaining": "4000", "x-ratelimit-reset": reset})
+        assert client._retry_after(response) == 60.0
+
+
+def test_primary_limit_sleeps_until_reset_capped():
+    import time
+
+    client = GitHubClient(API, StaticTokenProvider("t"))
+    soon = str(int(time.time()) + 30)
+    response = _rate_limited({"x-ratelimit-remaining": "0", "x-ratelimit-reset": soon})
+    assert 25 <= client._retry_after(response) <= 30
+    later = str(int(time.time()) + 3000)
+    response = _rate_limited({"x-ratelimit-remaining": "0", "x-ratelimit-reset": later})
+    assert client._retry_after(response) == 120.0
+
+
+def test_retry_after_is_honoured_and_clamped():
+    client = GitHubClient(API, StaticTokenProvider("t"))
+    assert client._retry_after(_rate_limited({"retry-after": "7"})) == 7.0
+    assert client._retry_after(_rate_limited({"retry-after": "0"})) == 1.0
+    assert client._retry_after(_rate_limited({"retry-after": "9999"})) == 120.0
+
+
+# -- credentials -----------------------------------------------------------
+
+
+class _RotatingProvider(StaticTokenProvider):
+    def __init__(self, tokens: list[str], refreshable: bool = True):
+        super().__init__(tokens[0])
+        self._queue = list(tokens)
+        self.refreshable = refreshable
+        self.invalidations = 0
+
+    async def token_for(self, repo: str) -> str:
+        return self._queue[0]
+
+    def invalidate(self, repo: str) -> bool:
+        self.invalidations += 1
+        if len(self._queue) > 1:
+            self._queue.pop(0)
+        return self.refreshable
+
+
+@respx.mock
+async def test_a_401_refreshes_credentials_once_and_retries():
+    """A revoked App token must not fail every filing until it would have expired."""
+    route = respx.get(f"{API}/repos/acme/api/issues").mock(
+        side_effect=[
+            httpx.Response(401, json={"message": "Bad credentials"}),
+            httpx.Response(200, json=[]),
+        ]
+    )
+    provider = _RotatingProvider(["old", "new"])
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(API, provider, client=http, sleep=no_sleep)
+        assert await client.list_issues_by_label("acme/api", "lbl") == []
+    assert provider.invalidations == 1
+    assert route.calls[1].request.headers["authorization"] == "Bearer new"
+
+
+@respx.mock
+async def test_a_persistent_401_is_not_retried_in_a_loop():
+    route = respx.get(f"{API}/repos/acme/api/issues").mock(
+        return_value=httpx.Response(401, json={"message": "Bad credentials"})
+    )
+    provider = _RotatingProvider(["a", "b", "c"])
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(API, provider, client=http, sleep=no_sleep)
+        with pytest.raises(GitHubError) as info:
+            await client.list_issues_by_label("acme/api", "lbl")
+    assert info.value.status == 401
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_a_401_on_a_pat_is_surfaced_immediately():
+    route = respx.get(f"{API}/repos/acme/api/issues").mock(
+        return_value=httpx.Response(401, json={"message": "Bad credentials"})
+    )
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(GitHubError):
+            await build_client(http).list_issues_by_label("acme/api", "lbl")
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_create_issue_sends_assignees_only_when_given():
+    import json
+
+    route = respx.post(f"{API}/repos/acme/api/issues").mock(
+        return_value=httpx.Response(201, json=issue_payload())
+    )
+    async with httpx.AsyncClient() as http:
+        client = build_client(http)
+        await client.create_issue("acme/api", "t", "b", ["l"])
+        await client.create_issue("acme/api", "t", "b", ["l"], assignees=["octocat"])
+    assert "assignees" not in json.loads(route.calls[0].request.content)
+    assert json.loads(route.calls[1].request.content)["assignees"] == ["octocat"]
+
+
 @respx.mock
 async def test_a_plain_403_is_not_treated_as_rate_limiting():
     """A permissions failure must surface immediately, not retry-loop."""

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from typing import Any
 
 import httpx
@@ -26,6 +27,10 @@ log = logging.getLogger(__name__)
 RETRY_STATUS = {500, 502, 503, 504}
 DEFAULT_TIMEOUT = 20.0
 MAX_ATTEMPTS = 4
+MAX_RATE_LIMIT_SLEEP = 120.0
+# GitHub's documented floor for a secondary limit that names no retry-after:
+# "wait for at least one minute before retrying".
+SECONDARY_RATE_LIMIT_SLEEP = 60.0
 
 
 class GitHubError(RuntimeError):
@@ -79,6 +84,7 @@ class GitHubClient:
         url = f"{self.api_url}{path}"
         allow_status = allow_status or set()
         last_error: Exception | None = None
+        refreshed_credentials = False
 
         for attempt in range(1, self.max_attempts + 1):
             headers = {
@@ -100,6 +106,19 @@ class GitHubClient:
 
             if response.status_code < 400 or response.status_code in allow_status:
                 return response
+
+            # A 401 with a cached App token means it was revoked or the App was
+            # reinstalled; without this, every filing fails until the cached
+            # token's own expiry, up to an hour later. Refresh once, not in a loop.
+            if (
+                response.status_code == 401
+                and not refreshed_credentials
+                and attempt < self.max_attempts
+                and self.tokens.invalidate(repo)
+            ):
+                refreshed_credentials = True
+                log.warning("github returned 401 for %s; refreshing credentials once", repo)
+                continue
 
             if response.status_code in (403, 429) and self._is_rate_limited(response):
                 delay = self._retry_after(response)
@@ -149,22 +168,27 @@ class GitHubClient:
         return "rate limit" in body or "secondary rate" in body
 
     def _retry_after(self, response: httpx.Response) -> float:
-        """Honour `retry-after`, then `x-ratelimit-reset`, else back off."""
+        """Honour `retry-after`; then, for an exhausted *primary* limit only,
+        `x-ratelimit-reset`; else GitHub's one-minute floor.
+
+        `x-ratelimit-reset` describes the primary window. On a secondary limit
+        (remaining > 0) it can be almost an hour away or already past, so using
+        it there either stalls the worker or retries straight back into the
+        limit, which GitHub answers by extending the block.
+        """
         retry_after = response.headers.get("retry-after")
         if retry_after:
             try:
-                return min(float(retry_after), 120.0)
+                return max(1.0, min(float(retry_after), MAX_RATE_LIMIT_SLEEP))
             except ValueError:
                 pass
         reset = response.headers.get("x-ratelimit-reset")
-        if reset:
+        if reset and response.headers.get("x-ratelimit-remaining") == "0":
             try:
-                import time
-
-                return max(1.0, min(float(reset) - time.time(), 120.0))
+                return max(1.0, min(float(reset) - time.time(), MAX_RATE_LIMIT_SLEEP))
             except ValueError:
                 pass
-        return 30.0
+        return SECONDARY_RATE_LIMIT_SLEEP
 
     async def _backoff(self, attempt: int) -> None:
         # Exponential with full jitter: 1s, 2s, 4s ... capped.
@@ -226,13 +250,21 @@ class GitHubClient:
         return response.status_code == 201
 
     async def create_issue(
-        self, repo: str, title: str, body: str, labels: list[str]
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        labels: list[str],
+        assignees: list[str] | None = None,
     ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"title": title, "body": body, "labels": labels}
+        if assignees:
+            payload["assignees"] = assignees
         response = await self.request(
             "POST",
             f"/repos/{repo}/issues",
             repo,
-            json={"title": title, "body": body, "labels": labels},
+            json=payload,
             allow_status={410},
         )
         if response.status_code == 410:
