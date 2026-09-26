@@ -478,3 +478,13 @@ def test_a_bad_trace_url_template_is_a_validation_error(template, problem):
 def test_a_good_trace_url_template_validates():
     settings = Settings(sink="dry-run", trace_url_template="https://g/x?traceId={trace_id}")
     assert settings.validation_errors() == []
+
+
+def test_the_api_reports_the_packaged_version(client):
+    # Read from the package, not typed into app.py: v0.5.0's API said 0.5.0
+    # only because someone remembered to edit it.
+    import tomllib
+    from pathlib import Path
+
+    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    assert client.get("/openapi.json").json()["info"]["version"] == pyproject["project"]["version"]

@@ -115,6 +115,23 @@ jobs:
         if: failure()
         run: docker logs e2i || true
 
+      # Fixable HIGH/CRITICAL vulnerabilities block the image here, before it
+      # is published, rather than in every deployment that pins it: v0.5.0
+      # shipped cryptography 49.0.0 (CVE-2026-69247) and the first to notice
+      # was a consumer's image scan. Same flags as that scan, so an image that
+      # passes here passes there.
+      - name: Scan the image for fixable vulnerabilities
+        env:
+          TRIVY_VERSION: "0.61.1"
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            "aquasec/trivy:${TRIVY_VERSION}" image \
+            --db-repository mirror.gcr.io/aquasec/trivy-db:2 \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+            err2issue:ci
+
       # Publish only after the smoke test passed, and only from main: the image
       # that ships is the image that was verified. `:latest` is what the
       # README/docker-compose/K8s examples reference; the immutable sha tag is
