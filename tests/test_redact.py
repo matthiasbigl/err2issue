@@ -181,3 +181,63 @@ def test_redaction_does_not_mutate_the_original_event():
     event = make_event(exception_message="ghp_" + "R" * 36)
     event.with_redactions(Redactor())
     assert "ghp_" in event.exception_message, "ErrorEvent must stay immutable"
+
+
+# -- URL query-string credentials --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "param",
+    ["X-Amz-Signature", "sig", "access_token", "token", "api_key", "client_secret"],
+)
+def test_credentials_in_a_url_query_are_masked_but_the_url_shape_survives(param):
+    value = "Zm9v" + "YmFy" + "c2VjcmV0"
+    text = f"GET https://bucket.example.com/obj.bin?X-Amz-Date=20260101&{param}={value}&v=2"
+    out = Redactor()(text)
+    assert value not in out
+    assert f"{param}={MASK}" in out
+    assert "X-Amz-Date=20260101" in out and "&v=2" in out
+
+
+def test_ordinary_query_parameters_are_left_alone():
+    text = "GET /search?q=shoes&page=3&sort=price"
+    assert Redactor()(text) == text
+
+
+# -- attribute keys ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "db.password",
+        "http.request.header.authorization",
+        "http.request.header.cookie",
+        "http.response.header.set-cookie",
+        "http.request.header.x-api-key",
+        "app.csrf_token",
+        "client_secret",
+    ],
+)
+def test_a_value_under_a_sensitive_key_is_masked_whatever_its_shape(key):
+    value = "hun" + "ter2"
+    assert Redactor().attributes({key: value}) == {key: MASK}
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["gen_ai.usage.input_tokens", "token_count", "http.route", "session.id", "secretary.name"],
+)
+def test_keys_that_merely_contain_a_sensitive_word_are_not_masked(key):
+    assert Redactor().attributes({key: "42"}) == {key: "42"}
+
+
+def test_attribute_values_under_ordinary_keys_still_get_pattern_redaction():
+    token = "ghp_" + "A" * 36
+    out = Redactor().attributes({"http.url": f"https://x/?q={token}"})
+    assert token not in out["http.url"]
+
+
+def test_disabled_redactor_leaves_attributes_alone():
+    attrs = {"db.password": "hun" + "ter2"}
+    assert Redactor(enabled=False).attributes(attrs) == attrs

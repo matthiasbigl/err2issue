@@ -65,6 +65,14 @@ class Service:
         self.http: httpx.AsyncClient | None = None
         self.startup_errors: list[str] = settings.validation_errors()
         self.dropped_backpressure = 0
+        # Requests refused before any record was looked at, by reason. A
+        # collector sending the wrong encoding or content-type otherwise fails
+        # silently: the error is in the *collector's* log, and err2issue's own
+        # counters all sit at zero as if no errors were happening.
+        self.rejected_requests: dict[str, int] = {}
+
+    def reject(self, reason: str) -> None:
+        self.rejected_requests[reason] = self.rejected_requests.get(reason, 0) + 1
 
     async def start(self) -> None:
         settings = self.settings
@@ -166,7 +174,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="err2issue",
-        version="0.1.0",
+        version="0.5.0",
         summary="OpenTelemetry errors in, deduplicated GitHub issues out.",
         lifespan=lifespan,
     )
@@ -180,11 +188,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             body = await _read_body(request)
         except _BodyTooLarge as exc:
+            service.reject("too_large")
             return _error(413, str(exc), content_type)
 
         try:
             body = _decompress(body, encoding)
         except ValueError as exc:
+            service.reject("bad_encoding")
             return _error(400, str(exc), content_type)
 
         try:
@@ -193,17 +203,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             elif content_type in otlp.JSON_CONTENT_TYPES or not content_type:
                 decoded = otlp.decode_json(json.loads(body or b"{}"))
             else:
+                service.reject("unsupported_content_type")
                 return _error(415, f"unsupported content-type {content_type!r}", content_type)
+            events, lines = otlp.to_events(
+                decoded, require_exception=settings.require_exception_attributes
+            )
         except (otlp.DecodeError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            service.reject("malformed")
             return _error(400, str(exc), content_type)
+        except Exception as exc:
+            # Backstop: the decoders are written not to raise on odd shapes, but
+            # a 500 here makes the collector retry the same poison batch forever.
+            # A 400 is OTLP's "do not retry".
+            log.exception("could not decode an OTLP export")
+            service.reject("malformed")
+            return _error(400, f"could not decode OTLP export: {type(exc).__name__}", content_type)
 
         service_metrics = service.pipeline.metrics if service.pipeline else None
         if service_metrics:
             service_metrics.received_records += len(decoded)
-
-        events, lines = otlp.to_events(
-            decoded, require_exception=settings.require_exception_attributes
-        )
 
         if service.pipeline:
             trace_ids = [
@@ -253,7 +271,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "the work queue was full.\n"
             "# TYPE err2issue_dropped_backpressure_total counter\n"
             f"err2issue_dropped_backpressure_total {service.dropped_backpressure}\n"
+            "# HELP err2issue_rejected_requests_total OTLP export requests refused "
+            "before decoding, by reason.\n"
+            "# TYPE err2issue_rejected_requests_total counter\n"
         )
+        for reason in _REJECT_REASONS:
+            count = service.rejected_requests.get(reason, 0)
+            text += f'err2issue_rejected_requests_total{{reason="{reason}"}} {count}\n'
+
         # A repository going unavailable drops every error routed to it while
         # /readyz stays green — deliberately, since the failure is per-repo and
         # restarting the pod does not fix it. These are the only signals that
@@ -284,6 +309,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "auth": settings.auth_mode,
             "queue_depth": service.queue.qsize(),
             "dropped_backpressure": service.dropped_backpressure,
+            "rejected_requests": dict(service.rejected_requests),
             "routing": service.pipeline.router.describe(),
             "suppression": service.pipeline.suppressor.stats(),
             "traces_buffered": len(service.pipeline.traces),
@@ -302,6 +328,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 # default-configured collector fails to parse and 400s. Found by running a real
 # collector against the service, not by reading the spec.
 _MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
+
+
+_REJECT_REASONS = ("too_large", "bad_encoding", "unsupported_content_type", "malformed")
 
 
 class _BodyTooLarge(Exception):

@@ -120,6 +120,45 @@ def test_malformed_protobuf_returns_400_not_500(client):
     assert response.status_code == 400
 
 
+def test_structurally_wrong_json_is_skipped_not_a_500(client):
+    """Valid JSON in the wrong shape used to raise AttributeError into the
+    handler: a 500, which the collector retries forever."""
+    payload = {"resourceLogs": [None, {"scopeLogs": {"oops": 1}}, otlp_json()["resourceLogs"][0]]}
+    response = client.post("/v1/logs", json=payload)
+    assert response.status_code == 200
+    drain(client)
+    assert client.app.state.service.pipeline.metrics.error_events == 1
+
+
+def test_an_unexpected_decode_failure_is_a_400_not_a_500(client, monkeypatch):
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("decoder bug")
+
+    monkeypatch.setattr("err2issue.app.otlp.to_events", explode)
+    response = client.post("/v1/logs", json=otlp_json())
+    assert response.status_code == 400
+    assert client.app.state.service.rejected_requests == {"malformed": 1}
+
+
+def test_rejected_requests_are_counted_by_reason(client):
+    client.post("/v1/logs", content=b"hello", headers={"content-type": "text/csv"})
+    client.post("/v1/logs", content=b"{not json", headers={"content-type": "application/json"})
+    client.post(
+        "/v1/logs",
+        content=b"junk",
+        headers={"content-type": "application/json", "content-encoding": "gzip"},
+    )
+    stats = client.get("/stats").json()
+    assert stats["rejected_requests"] == {
+        "unsupported_content_type": 1,
+        "malformed": 1,
+        "bad_encoding": 1,
+    }
+    metrics = client.get("/metrics").text
+    assert 'err2issue_rejected_requests_total{reason="malformed"} 1' in metrics
+    assert 'err2issue_rejected_requests_total{reason="too_large"} 0' in metrics
+
+
 def test_empty_body_is_accepted_as_an_empty_export(client):
     response = client.post("/v1/logs", content=b"", headers={"content-type": "application/json"})
     assert response.status_code == 200
@@ -420,3 +459,22 @@ def test_oversized_body_is_refused_without_content_length(client, small_ceiling)
     )
     assert response.status_code == 413
     assert response.json()["error"].startswith("body exceeds "), "must be the streaming guard"
+
+
+@pytest.mark.parametrize(
+    ("template", "problem"),
+    [
+        ("https://grafana/explore", "must contain {trace_id}"),
+        ("https://grafana/{trace}", "only the {trace_id} placeholder"),
+        ("grafana/{trace_id}", "http(s) URL"),
+        ("https://grafana/q=(trace:{trace_id})", "parentheses"),
+    ],
+)
+def test_a_bad_trace_url_template_is_a_validation_error(template, problem):
+    settings = Settings(sink="dry-run", trace_url_template=template)
+    assert any(problem in p for p in settings.validation_errors())
+
+
+def test_a_good_trace_url_template_validates():
+    settings = Settings(sink="dry-run", trace_url_template="https://g/x?traceId={trace_id}")
+    assert settings.validation_errors() == []

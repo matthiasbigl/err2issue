@@ -48,6 +48,12 @@ class ErrorEvent:
     body: str | None = None
     attributes: dict[str, str] = field(default_factory=dict)
     resource_attributes: dict[str, str] = field(default_factory=dict)
+    # The OTLP instrumentation scope name. Every mainstream logging bridge
+    # (Python `logging`, log4j/logback, zap, winston) sets it to the logger's
+    # name, e.g. `app.payments.stripe` — often the quickest pointer to the
+    # failing component, and absent everywhere else in a severity-only record.
+    # Not part of the fingerprint.
+    logger_name: str | None = None
 
     @property
     def severity(self) -> str:

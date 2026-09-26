@@ -7,13 +7,15 @@ these tests carry the most weight in the suite.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import httpx
+import pytest
 import respx
 
 from err2issue import fingerprint as fp
 from err2issue.github.auth import StaticTokenProvider
-from err2issue.github.client import GitHubClient
+from err2issue.github.client import GitHubClient, GitHubError
 from err2issue.github.filer import IssueFiler
 from tests.conftest import FakeClock, issue_payload, make_event, make_log_line, no_sleep
 
@@ -412,3 +414,413 @@ async def test_lookup_uses_the_versioned_fingerprint_label():
     params = listing.calls[0].request.url.params
     assert params["labels"] == f"err2issue-fp-v2-{FINGERPRINT}"
     assert params["state"] == "all"
+
+
+# -- summary vs description (A1) -------------------------------------------
+
+
+def _mock_create_path():
+    respx.get(f"{API}/repos/{REPO}/issues").mock(return_value=httpx.Response(200, json=[]))
+    respx.post(f"{API}/repos/{REPO}/labels").mock(return_value=httpx.Response(201, json={}))
+    return respx.post(f"{API}/repos/{REPO}/issues").mock(
+        return_value=httpx.Response(201, json=issue_payload())
+    )
+
+
+@respx.mock
+async def test_no_summary_section_when_there_is_no_description():
+    """The contract: `### Summary` is absent when enrichment fell back."""
+    create = _mock_create_path()
+    async with httpx.AsyncClient() as http:
+        await build_filer(http).file(make_event(), FINGERPRINT, REPO, "Cart total fails")
+    payload = body_of(create)
+    assert payload["title"] == "[x1] Cart total fails"
+    assert "### Summary" not in payload["body"]
+
+
+@respx.mock
+async def test_summary_section_carries_the_description_not_the_title():
+    create = _mock_create_path()
+    async with httpx.AsyncClient() as http:
+        await build_filer(http).file(
+            make_event(),
+            FINGERPRINT,
+            REPO,
+            "Cart total fails",
+            description="Prices can be null after the catalogue import.",
+        )
+    payload = body_of(create)
+    assert payload["title"] == "[x1] Cart total fails"
+    body = payload["body"]
+    assert "### Summary\n\nPrices can be null after the catalogue import." in body
+    assert "Cart total fails" not in body
+
+
+# -- body refresh on occurrence (A2) ---------------------------------------
+
+
+def _existing_body(count: int = 3, version: str = "1.4.2") -> str:
+    from err2issue import context as ctx
+
+    event = make_event(service_version=version, timestamp=datetime(2026, 7, 1, 9, 0, 0, tzinfo=UTC))
+    return ctx.build_body(event, FINGERPRINT, "v1", summary="", count=count)
+
+
+def _mock_occurrence(body: str | None):
+    respx.get(f"{API}/repos/{REPO}/issues").mock(
+        return_value=httpx.Response(
+            200, json=[issue_payload(number=7, title="[x3] TypeError in checkout", body=body)]
+        )
+    )
+    respx.post(f"{API}/repos/{REPO}/issues/7/comments").mock(
+        return_value=httpx.Response(201, json={})
+    )
+    return respx.patch(f"{API}/repos/{REPO}/issues/7").mock(
+        return_value=httpx.Response(200, json=issue_payload())
+    )
+
+
+@respx.mock
+async def test_occurrence_refreshes_header_and_rows_in_the_same_patch():
+    from err2issue.context import parse_header
+
+    patch = _mock_occurrence(_existing_body(count=3))
+    async with httpx.AsyncClient() as http:
+        await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
+
+    assert len(patch.calls) == 1, "title, state and body go in one round-trip"
+    payload = body_of(patch)
+    assert payload["title"] == "[x4] TypeError in checkout"
+    body = payload["body"]
+    # The issue keeps the version it was filed under; only the count moves.
+    assert parse_header(body) == {"fingerprint": FINGERPRINT, "version": "v1", "count": 4}
+    assert "| Last seen | 2026-07-28 12:00:00 UTC |" in body
+    assert "| Occurrences | 4 |" in body
+    assert "| First seen | 2026-07-01 09:00:00 UTC |" in body
+    assert "Latest version" not in body
+
+
+@respx.mock
+async def test_occurrence_body_refresh_preserves_human_edits():
+    edited = _existing_body().replace(
+        "### Exception", "Triage note: owned by payments.\n\n### Exception"
+    )
+    patch = _mock_occurrence(edited)
+    async with httpx.AsyncClient() as http:
+        await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
+    assert "Triage note: owned by payments." in body_of(patch)["body"]
+
+
+@respx.mock
+async def test_a_new_service_version_adds_a_latest_version_row():
+    patch = _mock_occurrence(_existing_body(version="1.4.2"))
+    async with httpx.AsyncClient() as http:
+        await build_filer(http).file(make_event(service_version="1.5.0"), FINGERPRINT, REPO, "s")
+    body = body_of(patch)["body"]
+    assert "| Version | `1.4.2` |\n| Latest version | `1.5.0` |" in body
+
+    # A later occurrence replaces the row rather than stacking another.
+    from err2issue.github.filer import _refresh_body
+
+    again = _refresh_body(body, make_event(service_version="1.6.0"), 5)
+    assert again.count("Latest version") == 1
+    assert "| Latest version | `1.6.0` |" in again
+
+
+@respx.mock
+async def test_body_without_a_header_is_not_patched():
+    patch = _mock_occurrence("A human rewrote this whole body.")
+    async with httpx.AsyncClient() as http:
+        await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
+    payload = body_of(patch)
+    assert "body" not in payload
+    assert payload["title"] == "[x4] TypeError in checkout"
+
+
+# -- body size cap (A3) ----------------------------------------------------
+
+
+@respx.mock
+async def test_an_oversized_body_still_files_within_the_body_limit():
+    """Rendering caps each section, but a generous config can still overflow."""
+    from err2issue.context import parse_header
+
+    create = _mock_create_path()
+    huge = "\n".join(f'  File "/app/x.py", line {i}, in f' for i in range(10_000))
+    async with httpx.AsyncClient() as http:
+        result = await build_filer(http, max_stacktrace_chars=1_000_000).file(
+            make_event(stacktrace=huge), FINGERPRINT, REPO, "s"
+        )
+    assert result.action == "created"
+    body = body_of(create)["body"]
+    assert len(body) <= 65_536
+    assert parse_header(body)["count"] == 1
+    assert "[truncated by err2issue]" in body
+    fences = [line for line in body.split("\n") if line.startswith("```")]
+    assert len(fences) % 2 == 0, "clipping must not leave a code fence open"
+
+
+def test_clip_leaves_short_bodies_alone():
+    from err2issue.github.filer import _clip
+
+    assert _clip("short") == "short"
+
+
+def test_clip_closes_an_open_fence():
+    from err2issue.github.filer import _clip
+
+    body = "header\n\n```\n" + "line\n" * 1000
+    clipped = _clip(body, limit=500)
+    assert len(clipped) <= 500
+    assert clipped.startswith("header")
+    fences = [line for line in clipped.split("\n") if line.startswith("```")]
+    assert len(fences) == 2
+
+
+@respx.mock
+async def test_occurrence_comments_are_clipped():
+    respx.get(f"{API}/repos/{REPO}/issues").mock(
+        return_value=httpx.Response(200, json=[issue_payload(number=7)])
+    )
+    respx.patch(f"{API}/repos/{REPO}/issues/7").mock(
+        return_value=httpx.Response(200, json=issue_payload())
+    )
+    comment = respx.post(f"{API}/repos/{REPO}/issues/7/comments").mock(
+        return_value=httpx.Response(201, json={})
+    )
+    async with httpx.AsyncClient() as http:
+        await build_filer(http, max_stacktrace_chars=200_000).file(
+            make_event(stacktrace="frame\n" * 30_000), FINGERPRINT, REPO, "s"
+        )
+    assert len(body_of(comment)["body"]) <= 65_536
+
+
+def test_clip_closes_a_long_fence_with_a_matching_one():
+    from err2issue.github.filer import _clip
+
+    body = "header\n````\n" + "x\n" * 50_000
+    clipped = _clip(body, limit=1000)
+    assert len(clipped) <= 1000 + 10
+    assert clipped.split("x\n")[-1].startswith("````\n")
+
+
+def test_clip_treats_an_inner_short_fence_as_content():
+    from err2issue.github.filer import _clip
+
+    body = "header\n````\n```\ninner\n```\n" + "y\n" * 50_000
+    assert _clip(body, limit=1000).rstrip().split("\n")[-3] == "````"
+
+
+@respx.mock
+async def test_the_filer_links_traces_when_a_template_is_configured():
+    create = _mock_create_path()
+    async with httpx.AsyncClient() as http:
+        filer = build_filer(http, trace_url_template="https://t.example/{trace_id}")
+        await filer.file(make_event(), FINGERPRINT, REPO, "s")
+    assert "(https://t.example/4bf92f3577b34da6a3ce929d0e0e4736)" in body_of(create)["body"]
+
+
+# -- closed as "not planned" -----------------------------------------------
+
+
+def _closed(reason: str, **kwargs) -> dict:
+    return {**issue_payload(number=7, state="closed", **kwargs), "state_reason": reason}
+
+
+def _mock_closed_occurrence(issue: dict):
+    respx.get(f"{API}/repos/{REPO}/issues").mock(return_value=httpx.Response(200, json=[issue]))
+    patch = respx.patch(f"{API}/repos/{REPO}/issues/7").mock(
+        return_value=httpx.Response(200, json=issue_payload())
+    )
+    comment = respx.post(f"{API}/repos/{REPO}/issues/7/comments").mock(
+        return_value=httpx.Response(201, json={})
+    )
+    return patch, comment
+
+
+@respx.mock
+async def test_an_issue_closed_as_not_planned_is_not_reopened_but_still_counts():
+    """A human decided not to fix this. Recurrence must not override them."""
+    patch, comment = _mock_closed_occurrence(_closed("not_planned", title="[x3] s", count=3))
+    async with httpx.AsyncClient() as http:
+        result = await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
+
+    assert result.action == "commented"
+    assert "not_planned" in result.detail
+    payload = body_of(patch)
+    assert "state" not in payload and "state_reason" not in payload
+    assert payload["title"] == "[x4] s", "the count stays truthful"
+    assert "Regression" not in body_of(comment)["body"]
+
+
+@respx.mock
+async def test_an_issue_closed_as_duplicate_is_not_reopened():
+    patch, _ = _mock_closed_occurrence(_closed("duplicate"))
+    async with httpx.AsyncClient() as http:
+        result = await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
+    assert result.action == "commented"
+    assert "state" not in body_of(patch)
+
+
+@respx.mock
+async def test_not_planned_comments_are_budgeted_like_routine_occurrences():
+    _, comment = _mock_closed_occurrence(_closed("not_planned"))
+    async with httpx.AsyncClient() as http:
+        filer = build_filer(http, max_comments_per_issue_per_hour=1)
+        for _ in range(3):
+            await filer.file(make_event(), FINGERPRINT, REPO, "s")
+    assert comment.call_count == 1
+
+
+@respx.mock
+async def test_reopening_not_planned_issues_can_be_opted_into():
+    patch, comment = _mock_closed_occurrence(_closed("not_planned"))
+    async with httpx.AsyncClient() as http:
+        result = await build_filer(http, reopen_not_planned=True).file(
+            make_event(), FINGERPRINT, REPO, "s"
+        )
+    assert result.action == "reopened"
+    assert body_of(patch)["state"] == "open"
+    assert "Regression" in body_of(comment)["body"]
+
+
+@respx.mock
+async def test_an_issue_closed_as_completed_still_reopens():
+    patch, _ = _mock_closed_occurrence(_closed("completed"))
+    async with httpx.AsyncClient() as http:
+        result = await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
+    assert result.action == "reopened"
+    assert body_of(patch)["state_reason"] == "reopened"
+
+
+# -- a refused comment does not undo the occurrence -------------------------
+
+
+@respx.mock
+async def test_a_locked_issue_still_records_the_occurrence():
+    """The PATCH landed; a 403 on the comment must not turn that into a failure."""
+    respx.get(f"{API}/repos/{REPO}/issues").mock(
+        return_value=httpx.Response(200, json=[issue_payload(number=7, title="[x2] s", count=2)])
+    )
+    patch = respx.patch(f"{API}/repos/{REPO}/issues/7").mock(
+        return_value=httpx.Response(200, json=issue_payload())
+    )
+    respx.post(f"{API}/repos/{REPO}/issues/7/comments").mock(
+        return_value=httpx.Response(
+            403, json={"message": "Unable to create comment because issue is locked."}
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        result = await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
+    assert result.action == "commented"
+    assert result.number == 7 and result.count == 3
+    assert "403" in result.detail
+    assert patch.called
+
+
+@respx.mock
+async def test_a_server_error_on_the_comment_still_raises():
+    """Only refusals that retrying cannot fix are tolerated."""
+    respx.get(f"{API}/repos/{REPO}/issues").mock(
+        return_value=httpx.Response(200, json=[issue_payload(number=7)])
+    )
+    respx.patch(f"{API}/repos/{REPO}/issues/7").mock(
+        return_value=httpx.Response(200, json=issue_payload())
+    )
+    respx.post(f"{API}/repos/{REPO}/issues/7/comments").mock(return_value=httpx.Response(500))
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(GitHubError):
+            await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
+
+
+# -- several issues on one fingerprint --------------------------------------
+
+
+@respx.mock
+async def test_the_most_recently_updated_closed_issue_is_chosen_and_the_split_logged(caplog):
+    older = {**issue_payload(number=3, state="closed"), "updated_at": "2026-01-01T00:00:00Z"}
+    newer = {**issue_payload(number=9, state="closed"), "updated_at": "2026-05-01T00:00:00Z"}
+    respx.get(f"{API}/repos/{REPO}/issues").mock(
+        return_value=httpx.Response(200, json=[older, newer])
+    )
+    respx.patch(f"{API}/repos/{REPO}/issues/9").mock(
+        return_value=httpx.Response(200, json=issue_payload())
+    )
+    respx.post(f"{API}/repos/{REPO}/issues/9/comments").mock(
+        return_value=httpx.Response(201, json={})
+    )
+    async with httpx.AsyncClient() as http:
+        result = await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
+    assert result.number == 9
+    assert "#3, #9" in caplog.text
+
+
+# -- extra labels and assignees --------------------------------------------
+
+
+@respx.mock
+async def test_extra_labels_are_created_with_a_colour_once_per_repo():
+    respx.get(f"{API}/repos/{REPO}/issues").mock(return_value=httpx.Response(200, json=[]))
+    labels = respx.post(f"{API}/repos/{REPO}/labels").mock(
+        return_value=httpx.Response(201, json={})
+    )
+    respx.post(f"{API}/repos/{REPO}/issues").mock(
+        return_value=httpx.Response(201, json=issue_payload())
+    )
+    async with httpx.AsyncClient() as http:
+        filer = build_filer(http, extra_labels=["err2issue", "prod"])
+        await filer.file(make_event(), FINGERPRINT, REPO, "s")
+        await filer.file(make_event(), "fedcba987654", REPO, "s")
+
+    created = [body_of(labels, i) for i in range(labels.call_count)]
+    extra = [c for c in created if not c["name"].startswith("err2issue-fp-")]
+    assert [c["name"] for c in extra] == ["err2issue", "prod"], "once per repo, not per issue"
+    assert all(c["color"] and c["description"] for c in extra)
+
+
+@respx.mock
+async def test_a_failure_styling_labels_does_not_block_filing():
+    respx.get(f"{API}/repos/{REPO}/issues").mock(return_value=httpx.Response(200, json=[]))
+    respx.post(f"{API}/repos/{REPO}/labels").mock(
+        side_effect=[httpx.Response(201, json={}), httpx.Response(403, json={"message": "no"})]
+    )
+    create = respx.post(f"{API}/repos/{REPO}/issues").mock(
+        return_value=httpx.Response(201, json=issue_payload(number=5))
+    )
+    async with httpx.AsyncClient() as http:
+        result = await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
+    assert result.action == "created" and create.called
+
+
+@respx.mock
+async def test_new_issues_carry_the_configured_assignees():
+    create = _mock_create_path()
+    async with httpx.AsyncClient() as http:
+        await build_filer(http, assignees=["octocat"]).file(make_event(), FINGERPRINT, REPO, "s")
+    assert body_of(create)["assignees"] == ["octocat"]
+
+
+@respx.mock
+async def test_an_unassignable_login_files_the_issue_unassigned():
+    create = _mock_create_path()
+    create.mock(
+        side_effect=[
+            httpx.Response(422, json={"message": "Validation Failed"}),
+            httpx.Response(201, json=issue_payload(number=8)),
+        ]
+    )
+    async with httpx.AsyncClient() as http:
+        result = await build_filer(http, assignees=["ghost"]).file(
+            make_event(), FINGERPRINT, REPO, "s"
+        )
+    assert result.number == 8
+    assert body_of(create, 0)["assignees"] == ["ghost"]
+    assert "assignees" not in body_of(create, 1)
+
+
+@respx.mock
+async def test_no_assignees_key_is_sent_by_default():
+    create = _mock_create_path()
+    async with httpx.AsyncClient() as http:
+        await build_filer(http).file(make_event(), FINGERPRINT, REPO, "s")
+    assert "assignees" not in body_of(create)

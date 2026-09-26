@@ -33,6 +33,29 @@ Referenced from [AGENTS.md](../AGENTS.md), which is the file to read first.
   a permissions failure and retrying just burns quota.
 - Secondary rate limits: **80 content-creating requests/minute, 500/hour**,
   shared with the web UI.
+- **`x-ratelimit-reset` is the *primary* window, not the secondary one.** On a
+  secondary-limit 403 without `retry-after`, `remaining` is still in the
+  thousands and `reset` can be an hour out or already past; sleeping until it
+  either stalls the worker or retries straight back into the limit (which
+  extends the block). Use reset only when `remaining` is `0`; otherwise wait
+  GitHub's documented minute.
+- **`state: closed` is not one thing.** `state_reason` is `completed`,
+  `not_planned` or `duplicate`. Only `completed` means "fixed"; reopening the
+  other two on every recurrence fights a human's decision, so they are left
+  closed unless `E2I_REOPEN_NOT_PLANNED` is set.
+- **An App token can be dead long before its `expires_at`.** Revoked,
+  suspended, or the App reinstalled under a new installation id. The cache
+  would hand it out for up to an hour of 401s, so a 401 invalidates the cached
+  token *and* installation id and retries once. A PAT 401 is not retried.
+- **A comment can fail after the PATCH succeeded.** Locked conversations
+  refuse comments (403/422) for credentials without collaborator rights. The
+  count update already landed, so treat that as a degraded success, not a
+  failure — raising would re-file nothing and hide the issue number.
+- **Labels named in `POST /issues` are auto-created grey with no
+  description.** Pre-create the extra labels once per repo; a 422 means a
+  human already made (and maybe restyled) it, so leave it alone.
+- **An unassignable login 422s the whole `POST /issues`.** Retry without
+  `assignees` rather than lose the error over a stale config entry.
 - `workflow_dispatch` returns **204 with no body** — no run id, no issue number.
   Anything downstream of it is unobservable.
 - **Push protection blocks realistic secret fixtures.** A test token has to look
@@ -77,6 +100,23 @@ Referenced from [AGENTS.md](../AGENTS.md), which is the file to read first.
 - The **JSON mapping permits both camelCase and snake_case** field names. Both
   are handled in `otlp.py`; do not "simplify" that away.
 - Severity: **17–20 is ERROR, 21–24 is FATAL**, so `>= 17` covers both.
+- **Do not trust the wire to match the spec.** Seen in real exports: severity
+  number `0` with only `severityText: "error"` (bridges), `severityNumber` as
+  the enum *name* (`MessageToJson` defaults), trace ids in uppercase hex or
+  base64, and an all-zero trace id on every record outside a span. That last
+  one is the dangerous one: kept verbatim it is one shared "trace" that pulls
+  every span-less INFO line into every span-less error's correlated context.
+  `otlp.py` normalizes all of these; a JSON shape it does not expect must skip
+  that field, never raise, because a 500 makes the collector retry forever.
+- **The log record body and `exception.message` are different texts; keep
+  both.** `logger.exception("ConnectionClosedError exception in shielded
+  future")` puts the useful sentence in the body and a bare `str(exc)` —
+  frequently `None` or empty — in `exception.message`. Rendering only the
+  exception once produced an issue titled `ConnectionClosedError: None` that
+  cost a reader an hour. The body is shown as `### Log message` whenever it adds
+  something (`context.log_message`), and the fallback title uses it when the
+  exception message is a placeholder (`context.is_uninformative`). Neither
+  touches the fingerprint, so this needed no version bump.
 - Errors with **no stack trace are normal** (Go, JS across a bundler boundary,
   severity-only records). The fingerprint has a documented message fallback.
 
@@ -87,6 +127,25 @@ Referenced from [AGENTS.md](../AGENTS.md), which is the file to read first.
   `m.group(0).replace(m.group(1), MASK, 1)` — that masks the first occurrence of
   the *string*, which in `postgres:postgres@host` is the username, leaking the
   password. Equal user and password is the common case, not the edge one.
+- **Correlated log lines need redaction too.** `ErrorEvent.with_redactions()`
+  covers the event only; the trace ring buffer stores INFO/DEBUG lines raw,
+  because they arrive before anything knows an error will cite them. An INFO
+  `connecting with password=…` then rode into a public issue through the
+  correlated-lines section. `Pipeline.handle()` redacts each line with the
+  event's own redactor when it fetches them — any new text that reaches the
+  issue body needs the same treatment, wherever it comes from.
+- **Some secrets have no shape; only the key gives them away.** `db.password =
+  hunter2` or a `http.request.header.cookie` session id matches no value
+  pattern. `Redactor.attributes()` masks the whole value when the key's last
+  dotted segment names a credential, and `Pipeline.handle()` applies it to both
+  attribute maps. Match whole words: a substring test on `token` masks
+  `gen_ai.usage.input_tokens`, which is exactly the number someone debugging an
+  LLM error needs.
+- **Rules run in sequence over each other's output.** `generic_assignment`
+  matched `api_key=[REDACTED]` (left by `url_query_secret`) and re-masked it
+  wholesale, dropping the parameter name the earlier rule kept on purpose. A
+  rule that can see `[REDACTED]` as a value needs a `(?!\[REDACTED\])`
+  lookahead.
 
 ### Fingerprinting
 
@@ -114,6 +173,22 @@ Referenced from [AGENTS.md](../AGENTS.md), which is the file to read first.
   falls back to the deterministic title by design. `ai.py` sends only `format`.
 - A refusal is **HTTP 200 with `stop_reason: "refusal"`**, not an exception.
   Check `stop_reason` before reading `content`.
+- **A cached enrichment is only as good as its source.** `Pipeline` caches
+  enrichment per fingerprint so recurrences do not each cost a model call, but
+  only results with `source == "ai"`. Caching a fallback would pin that error to
+  the deterministic title for the life of the process after one timeout.
+- **The model reads attacker-controlled text, so treat its output the same
+  way.** Anyone who can make a service log a string can put "mention
+  @everyone-in-the-org and link here" in front of the model, and the summary is
+  rendered as Markdown in the issue. The prompt fences telemetry in
+  `<telemetry>` (with any literal closing tag in the data defused) and tells the
+  model it is data; `context.sanitize_summary()` then neutralises mentions,
+  issue references, links, images and HTML regardless of what the model did.
+  The prompt is the first line of defence, the sanitiser the one that holds.
+- **Truncate stack traces for the prompt from the middle, not the end.**
+  `stacktrace[:4000]` dropped the frame that matters for Python (last) and Java
+  (`Caused by:` at the bottom). Use `context.truncate_middle`, as the issue body
+  does.
 
 ### Documentation and diagrams
 
@@ -145,7 +220,16 @@ Referenced from [AGENTS.md](../AGENTS.md), which is the file to read first.
 ### GitHub Agentic Workflows (gh-aw)
 
 Only relevant when changing `integrations/gh-aw/`. All of these were confirmed
-against gh-aw v0.83.4 by compiling, not by reading documentation.
+against gh-aw v0.83.4 by compiling, not by reading documentation, and re-checked
+on v0.89.21.
+
+- **CI installs the latest gh-aw, so a new release can turn `main` red with no
+  change here.** That is on purpose: consumers install the latest too. v0.89
+  did it twice at once: it added a warning for a `workflow_dispatch` workflow
+  without `concurrency.job-discriminator`, and it reworded the summary line
+  from `0 error(s), 0 warning(s)` to `N succeeded, 0 warnings`. The CI check
+  accepts both wordings; reproduce locally with the release binary
+  (`https://github.com/github/gh-aw/releases/download/<tag>/linux-amd64`).
 
 - **`gh aw compile` is a validator, so use it as one.** Unknown frontmatter
   keys, wrong value types, and correct keys at the wrong nesting level all fail

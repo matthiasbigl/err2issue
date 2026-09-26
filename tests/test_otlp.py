@@ -7,6 +7,9 @@ receiver 415s and the collector retries forever).
 
 from __future__ import annotations
 
+import base64
+
+import pytest
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
 
 from err2issue import otlp
@@ -97,7 +100,7 @@ def test_json_accepts_snake_case_field_names():
                             {
                                 "severity_number": 17,
                                 "time_unix_nano": "1785585600000000000",
-                                "trace_id": "abc",
+                                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
                                 "body": {"string_value": "failed"},
                             }
                         ]
@@ -108,7 +111,7 @@ def test_json_accepts_snake_case_field_names():
     }
     decoded = otlp.decode_json(payload)
     assert decoded[0][0]["service.name"] == "svc"
-    assert decoded[0][1]["trace_id"] == "abc"
+    assert decoded[0][1]["trace_id"] == "4bf92f3577b34da6a3ce929d0e0e4736"
 
 
 def test_json_and_protobuf_agree():
@@ -227,3 +230,259 @@ def test_multiple_resources_and_scopes_are_all_walked():
     payload["resourceLogs"].append(otlp_json(service="other-api")["resourceLogs"][0])
     events, _ = otlp.to_events(otlp.decode_json(payload))
     assert {e.service_name for e in events} == {"checkout-api", "other-api"}
+
+
+def test_exception_record_keeps_its_log_body_alongside_the_message():
+    payload = otlp_json(
+        exception_type="ConnectionClosedError",
+        message="None",
+        stacktrace=None,
+        body="ConnectionClosedError exception in shielded future",
+    )
+    events, _ = otlp.to_events(otlp.decode_json(payload))
+    assert events[0].exception_message == "None"
+    assert events[0].body == "ConnectionClosedError exception in shielded future"
+
+
+# -- malformed and non-canonical JSON --------------------------------------
+
+
+def _record(payload: dict) -> dict:
+    return payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"resourceLogs": {"not": "a list"}},
+        {"resourceLogs": [None, 3, "x"]},
+        {"resourceLogs": [{"resource": [], "scopeLogs": {"x": 1}}]},
+        {"resourceLogs": [{"resource": {"attributes": [1, None, {"key": "k"}]}}]},
+        {"resourceLogs": [{"scopeLogs": [None, {"logRecords": [None, 7]}]}]},
+        {"resourceLogs": [{"scopeLogs": [{"logRecords": [{"timeUnixNano": "soon"}]}]}]},
+        {"resourceLogs": [{"scopeLogs": [{"logRecords": [{"severityNumber": [17]}]}]}]},
+        {"resourceLogs": [{"scopeLogs": [{"logRecords": [{"traceId": 12, "spanId": {}}]}]}]},
+        {
+            "resourceLogs": [
+                {
+                    "scopeLogs": [
+                        {
+                            "logRecords": [
+                                {
+                                    "severityNumber": 17,
+                                    "body": {"kvlistValue": [1, 2]},
+                                    "attributes": [{"key": "a", "value": {"arrayValue": 5}}],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        },
+    ],
+)
+def test_malformed_json_shapes_never_raise(payload):
+    otlp.to_events(otlp.decode_json(payload))
+
+
+def test_severity_enum_names_from_protobuf_json_encoders_are_understood():
+    payload = otlp_json(exception_type=None, body="db down")
+    _record(payload)["severityNumber"] = "SEVERITY_NUMBER_FATAL2"
+    events, _ = otlp.to_events(otlp.decode_json(payload))
+    assert len(events) == 1
+    assert events[0].severity_number == 22
+
+
+def test_a_timestamp_far_past_year_9999_falls_back_to_now():
+    payload = otlp_json()
+    _record(payload)["timeUnixNano"] = "9" * 25
+    events, _ = otlp.to_events(otlp.decode_json(payload))
+    assert events[0].timestamp.year >= 2026
+
+
+def test_zero_event_time_falls_back_to_observed_time_in_json():
+    payload = otlp_json()
+    _record(payload)["timeUnixNano"] = "0"
+    _record(payload)["observedTimeUnixNano"] = "1785585600000000000"
+    events, _ = otlp.to_events(otlp.decode_json(payload))
+    assert (events[0].timestamp.year, events[0].timestamp.month) == (2026, 8)
+
+
+# -- trace / span id normalization -----------------------------------------
+
+TRACE_HEX = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (TRACE_HEX, TRACE_HEX),
+        (TRACE_HEX.upper(), TRACE_HEX),
+        (f"  {TRACE_HEX} ", TRACE_HEX),
+        (base64.b64encode(bytes.fromhex(TRACE_HEX)).decode(), TRACE_HEX),
+        ("0" * 32, None),
+        (base64.b64encode(bytes(16)).decode(), None),
+        ("abc", None),
+        ("zz" * 16, None),
+        (TRACE_HEX[:-2], None),
+    ],
+)
+def test_json_trace_ids_are_normalized_to_lowercase_hex(raw, expected):
+    _, record = otlp.decode_json(otlp_json(trace_id=raw))[0]
+    assert record["trace_id"] == expected
+
+
+def test_json_span_id_must_be_eight_bytes():
+    payload = otlp_json()
+    _record(payload)["spanId"] = "00F067AA0BA902B7"
+    assert otlp.decode_json(payload)[0][1]["span_id"] == "00f067aa0ba902b7"
+    _record(payload)["spanId"] = TRACE_HEX
+    assert otlp.decode_json(payload)[0][1]["span_id"] is None
+
+
+def test_all_zero_protobuf_ids_mean_no_trace():
+    request = ExportLogsServiceRequest()
+    request.ParseFromString(build_protobuf())
+    record = request.resource_logs[0].scope_logs[0].log_records[0]
+    record.trace_id = bytes(16)
+    record.span_id = bytes(8)
+    _, decoded = otlp.decode_protobuf(request.SerializeToString())[0]
+    assert decoded["trace_id"] is None
+    assert decoded["span_id"] is None
+
+
+def test_span_less_lines_are_not_correlated_through_a_zero_trace():
+    """Before normalization every span-less INFO line landed in one shared
+    trace-000…0 bucket and showed up as "correlated" context on every span-less
+    error."""
+    from err2issue.context import TraceBuffer
+
+    buffer = TraceBuffer(max_traces=10)
+    info = otlp.decode_json(
+        otlp_json(severity_number=9, exception_type=None, body="unrelated", trace_id="0" * 32)
+    )
+    _, lines = otlp.to_events(info)
+    for line, (_, record) in zip(lines, info, strict=True):
+        buffer.add(record["trace_id"], line)
+    error = otlp.decode_json(otlp_json(trace_id="0" * 32))
+    events, _ = otlp.to_events(error)
+    assert events[0].trace_id is None
+    assert buffer.get(events[0].trace_id) == []
+
+
+# -- severity text fallback and message-only exceptions --------------------
+
+
+def _unspecified(text: str, **kwargs) -> dict:
+    payload = otlp_json(severity_number=0, exception_type=None, body="db pool exhausted", **kwargs)
+    _record(payload)["severityText"] = text
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("text", "number"),
+    [
+        ("ERROR", 17),
+        ("error", 17),
+        (" Error ", 17),
+        ("ERROR3", 19),
+        ("SEVERE", 17),
+        ("FATAL", 21),
+        ("CRITICAL", 21),
+        ("critical", 21),
+        ("EMERG", 23),
+    ],
+)
+def test_unspecified_number_falls_back_to_severity_text(text, number):
+    events, lines = otlp.to_events(otlp.decode_json(_unspecified(text)))
+    assert len(events) == 1 and not lines
+    assert events[0].severity_number == number
+    assert events[0].exception_type == "Error"
+    assert events[0].exception_message == "db pool exhausted"
+
+
+@pytest.mark.parametrize("text", ["INFO", "WARN", "warning", "", "ERRORS", "debug"])
+def test_non_error_severity_text_stays_a_context_line(text):
+    events, lines = otlp.to_events(otlp.decode_json(_unspecified(text)))
+    assert not events and len(lines) == 1
+
+
+def test_severity_text_never_overrides_an_explicit_number():
+    payload = otlp_json(severity_number=9, exception_type=None, body="handled")
+    _record(payload)["severityText"] = "ERROR"
+    events, _ = otlp.to_events(otlp.decode_json(payload))
+    assert events == []
+
+
+def test_severity_text_fallback_works_over_protobuf():
+    request = ExportLogsServiceRequest()
+    request.ParseFromString(build_protobuf(exc_type=None))
+    record = request.resource_logs[0].scope_logs[0].log_records[0]
+    record.severity_number = 0
+    record.severity_text = "fatal"
+    events, _ = otlp.to_events(otlp.decode_protobuf(request.SerializeToString()))
+    assert [e.severity_number for e in events] == [21]
+
+
+def test_severity_text_does_not_bypass_require_exception():
+    events, _ = otlp.to_events(otlp.decode_json(_unspecified("ERROR")), require_exception=True)
+    assert events == []
+
+
+def test_exception_message_without_type_counts_as_an_exception():
+    """Semconv: exception.type OR exception.message. `require_exception` used to
+    look at the type only, so message-only SDKs were dropped entirely."""
+    payload = otlp_json(severity_number=9, exception_type=None)
+    _record(payload)["attributes"] = [
+        {"key": "exception.message", "value": {"stringValue": "connection reset"}}
+    ]
+    events, _ = otlp.to_events(otlp.decode_json(payload), require_exception=True)
+    assert len(events) == 1
+    assert (events[0].exception_type, events[0].exception_message) == (
+        "Error",
+        "connection reset",
+    )
+
+
+def test_blank_exception_message_alone_is_not_an_exception():
+    payload = otlp_json(severity_number=9, exception_type=None, body="fine")
+    _record(payload)["attributes"] = [{"key": "exception.message", "value": {"stringValue": " "}}]
+    events, _ = otlp.to_events(otlp.decode_json(payload))
+    assert events == []
+
+
+# -- instrumentation scope -> logger_name ----------------------------------
+
+
+def test_json_scope_name_becomes_logger_name():
+    payload = otlp_json()
+    payload["resourceLogs"][0]["scopeLogs"][0]["scope"] = {"name": "app.payments.stripe"}
+    events, _ = otlp.to_events(otlp.decode_json(payload))
+    assert events[0].logger_name == "app.payments.stripe"
+
+
+def test_protobuf_scope_name_becomes_logger_name():
+    request = ExportLogsServiceRequest()
+    request.ParseFromString(build_protobuf())
+    request.resource_logs[0].scope_logs[0].scope.name = "com.acme.CheckoutService"
+    events, _ = otlp.to_events(otlp.decode_protobuf(request.SerializeToString()))
+    assert events[0].logger_name == "com.acme.CheckoutService"
+
+
+@pytest.mark.parametrize("scope", [None, {}, {"name": ""}, {"name": 5}, ["x"]])
+def test_missing_or_odd_scope_leaves_logger_name_unset(scope):
+    payload = otlp_json()
+    if scope is not None:
+        payload["resourceLogs"][0]["scopeLogs"][0]["scope"] = scope
+    events, _ = otlp.to_events(otlp.decode_json(payload))
+    assert events[0].logger_name is None
+
+
+def test_logger_name_is_not_part_of_the_fingerprint():
+    from err2issue import fingerprint
+
+    plain = otlp.to_events(otlp.decode_json(otlp_json()))[0][0]
+    scoped_payload = otlp_json()
+    scoped_payload["resourceLogs"][0]["scopeLogs"][0]["scope"] = {"name": "anything"}
+    scoped = otlp.to_events(otlp.decode_json(scoped_payload))[0][0]
+    assert fingerprint.compute(plain) == fingerprint.compute(scoped)

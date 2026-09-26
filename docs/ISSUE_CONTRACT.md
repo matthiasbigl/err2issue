@@ -24,6 +24,7 @@ everything marked stable.**
 │         **`TypeError`** in **checkout-api**                    │
 │         | table: first/last seen, service, version, trace |    │
 │         ### Summary        ← AI-written, or absent             │
+│         ### Log message    ← the record body, when it differs  │
 │         ### Exception                                          │
 │         ### Stack trace                                        │
 │         ### Correlated log lines                               │
@@ -84,20 +85,69 @@ freely by humans or agents.
 
 These headings are stable when present. Any may be absent — the stack trace
 section is missing for errors without a stack, `### Summary` is missing when AI
-enrichment is unconfigured or fell back.
+enrichment is unconfigured or fell back, and `### Log message` is missing when
+the record's body is empty or repeats the exception message.
+
+Fenced blocks use a fence longer than any backtick run in their content, so a
+message containing ```` ``` ```` cannot close the block early. Parse fences as
+CommonMark does (a closing fence at least as long as the opening one), not as a
+literal ```` ``` ````.
 
 | Heading | Contents |
 |---|---|
-| `### Summary` | Two or three sentences, AI-written |
-| `### Exception` | Fenced block: `Type: message` |
-| `### Stack trace` | Fenced block, **top frame first** |
+| `### Summary` | Two or three sentences, AI-written, sanitised (see below) |
+| `### Log message` | Fenced block: the log record's body, verbatim. Present only when it says something `exception.message` does not |
+| `### Exception` | Fenced block: `Type: message`, or just `Type` when the message is empty |
+| `### Stack trace` | Fenced block, frames in the order the runtime emitted them; long traces keep head and tail, with a `... [N characters omitted] ...` line between |
 | `### Correlated log lines (trace \`…\`)` | Fenced block, oldest first |
 | `<details><summary>Runtime attributes</summary>` | Markdown table of span attributes |
 
+The model that writes `### Summary` read production text, so its output is
+treated as untrusted too. Outside code spans, `@user` and `@org/team` become
+inline code (nobody is notified), `#12` and `owner/repo#12` become inline code
+(no cross-reference lands in another issue), links and images are flattened to
+`text (url)` so the target is always visible, and `<` is escaped so no HTML —
+tracking images, comments, a forged machine header — survives. The summary is
+capped at 1,500 characters.
+
+Attribute values whose key names a credential (`db.password`,
+`http.request.header.authorization`, `…cookie`, `…x-api-key`, and similar,
+matched on the last dotted segment) are shown as `[REDACTED]` whatever their
+shape.
+
 ## Not stable — do not parse
 
-The prose in `### Summary`, exact table row order, timestamp formatting, and the
-footer. Read these; do not build a parser on them.
+The prose in `### Summary`, the set and order of rows in the summary table,
+timestamp formatting, and the footer. Read these; do not build a parser on them.
+
+The summary table always carries first/last seen, occurrences, service,
+version, severity, and fingerprint. The rows below appear only when the record
+or its resource carries the attribute — record attributes win, and current and
+older semantic-convention names both resolve:
+
+| Row | From |
+|---|---|
+| Environment | `deployment.environment.name`, `deployment.environment` |
+| Host | `k8s.pod.name`, `host.name`, plus `(ns k8s.namespace.name)` |
+| Location | `code.file.path`/`code.filepath`, `:code.line.number`/`code.lineno`, `in code.function.name`/`code.function` |
+| Request | `http.request.method`/`http.method`, `http.route`/`url.path`/`http.target`, `→ http.response.status_code`/`http.status_code` |
+| Logger | the instrumentation scope name (the logger name, for logging bridges) |
+| Escaped | `yes (unhandled)` when `exception.escaped` is `true` |
+
+Occurrence comments repeat Environment and Host as bullets. Attacker-influenced
+values in tables are rendered as inline code with `|` escaped and newlines
+collapsed, so they cannot break out of their row. The runtime attributes table
+shows at most 50 rows, then a `+N more` row.
+
+When `E2I_TRACE_URL_TEMPLATE` is set (for example
+`https://grafana.example.com/explore?traceId={trace_id}`), the Trace ID row and
+the occurrence comment's trace bullet link to the telemetry backend. Only a
+hex trace id is ever interpolated into the URL.
+
+On each later occurrence err2issue rewrites the header's `count=`, the Last
+seen and Occurrences rows, and — when the service version differs from the one
+first filed — a `Latest version` row. Everything else in the body, including
+human edits, is left as it was.
 
 ## Lifecycle
 
@@ -108,6 +158,7 @@ stateDiagram-v2
     Open --> Open: recurrence
     Open --> Closed: closed
     Closed --> Open: regression
+    Closed --> Closed: recurrence after a not planned close
     Closed --> [*]: never recurs
 ```
 
@@ -124,6 +175,23 @@ Regression comments are never suppressed by the budget.
 This is why closing an err2issue issue is meaningful: if the error comes back,
 the same issue reopens. **That reopen is the signal that a fix did not hold**,
 and it is the single most useful thing this format gives you.
+
+**Closed as not planned.** An issue closed with `state_reason: not_planned` or
+`duplicate` is a decision, not a fix, so a recurrence does **not** reopen it by
+default. It is treated as a routine occurrence instead: `[xN]` and the header
+count still rise, and a budgeted `### Occurrence #N` comment is added, but the
+issue stays closed. Set `E2I_REOPEN_NOT_PLANNED=true` to reopen these too. To
+stop the count moving as well, remove the fingerprint label — the next
+occurrence then files a fresh issue.
+
+**Comment refused.** If the occurrence comment is refused (403/422 on a locked
+conversation, 404/410 if the issue vanished mid-filing) the title and header
+update still stands, and the filing is reported as `commented` with a note in
+`detail` rather than as a failure.
+
+**Several issues on one label.** Should a human copy a fingerprint label onto a
+second issue, the open one wins; among closed ones, the most recently updated.
+err2issue logs a warning naming every candidate so they can be merged.
 
 ## Consuming
 
@@ -209,6 +277,11 @@ exist. If you write one:
 | Service | `checkout-api` |
 | Version | `1.4.2` |
 | Severity | `ERROR` |
+| Environment | `production` |
+| Host | `checkout-7d9f4 (ns shop)` |
+| Location | `src/checkout/cart.py:88 in total` |
+| Request | `POST /checkout → 500` |
+| Escaped | yes (unhandled) |
 | Fingerprint | `v2:a3f9c21b8e04` |
 | Trace ID | `4bf92f3577b34da6a3ce929d0e0e4736` |
 
@@ -244,9 +317,15 @@ TypeError: unsupported operand type(s) for +: 'int' and 'NoneType'
 
 | Attribute | Value |
 |---|---|
-| `deployment.environment` | `production` |
+| `code.file.path` | `src/checkout/cart.py` |
+| `code.function.name` | `total` |
+| `code.line.number` | `88` |
+| `deployment.environment.name` | `production` |
+| `http.request.method` | `POST` |
+| `http.response.status_code` | `500` |
 | `http.route` | `/checkout` |
-| `http.status_code` | `500` |
+| `k8s.namespace.name` | `shop` |
+| `k8s.pod.name` | `checkout-7d9f4` |
 
 </details>
 ```

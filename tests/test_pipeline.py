@@ -21,13 +21,16 @@ from tests.conftest import FakeClock, make_event, make_log_line
 
 
 class RecordingEnricher:
-    def __init__(self, title: str = "A title"):
+    def __init__(self, title: str = "A title", summary: str = ""):
         self.title = title
+        self.summary = summary
         self.seen = []
+        self.correlated = []
 
-    async def enrich(self, event):
+    async def enrich(self, event, correlated=None):
         self.seen.append(event)
-        return Enrichment(title=self.title, summary="", source="ai")
+        self.correlated.append(list(correlated or []))
+        return Enrichment(title=self.title, summary=self.summary, source="ai")
 
 
 class ExplodingSink(DryRunSink):
@@ -198,3 +201,140 @@ async def test_suppression_reasons_are_aggregated():
     for _ in range(3):
         await pipeline.handle(make_event())
     assert sum(pipeline.metrics.suppression_reasons.values()) == 2
+
+
+# -- correlated-line redaction ---------------------------------------------
+
+
+class CapturingSink(DryRunSink):
+    def __init__(self):
+        super().__init__(emit=lambda payload: None)
+        self.correlated = []
+        self.descriptions = []
+
+    async def deliver(self, event, fingerprint, repo, summary, correlated=None, **kwargs):
+        self.correlated.append(list(correlated or []))
+        self.descriptions.append(kwargs.get("description", ""))
+        return await super().deliver(
+            event, fingerprint, repo, summary, correlated=correlated, **kwargs
+        )
+
+
+async def test_correlated_log_lines_are_redacted_before_delivery():
+    """The trace buffer holds raw lines; they reach the same public issue as the event."""
+    # Built from fragments so push protection does not reject the file.
+    secret = "ghp_" + "Q" * 36
+    sink = CapturingSink()
+    pipeline = build(sink=sink)
+    event = make_event()
+    pipeline.absorb_context([make_log_line(f"connecting with token {secret}")], [event.trace_id])
+    await pipeline.handle(event)
+    [lines] = sink.correlated
+    assert len(lines) == 1
+    assert secret not in lines[0].text
+    assert "connecting with token [REDACTED]" in lines[0].text
+
+
+async def test_correlated_log_lines_pass_through_when_redaction_is_disabled():
+    secret = "ghp_" + "Q" * 36
+    sink = CapturingSink()
+    pipeline = build(sink=sink, redactor=Redactor(enabled=False))
+    event = make_event()
+    pipeline.absorb_context([make_log_line(f"token {secret}")], [event.trace_id])
+    await pipeline.handle(event)
+    assert secret in sink.correlated[0][0].text
+
+
+# -- enrichment cache ------------------------------------------------------
+
+
+class FallbackEnricher(RecordingEnricher):
+    async def enrich(self, event, correlated=None):
+        self.seen.append(event)
+        return Enrichment(title="fallback", summary="", source="fallback")
+
+
+async def test_a_recurrence_reuses_the_cached_enrichment():
+    clock = FakeClock()
+    enricher = RecordingEnricher()
+    sink = DryRunSink(emit=lambda payload: None)
+    pipeline = build(sink=sink, clock=clock, enricher=enricher)
+    await pipeline.handle(make_event())
+    clock.advance(601)  # past the 600s suppression window
+    await pipeline.handle(make_event())
+    assert len(sink.calls) == 2
+    assert len(enricher.seen) == 1
+
+
+async def test_a_fallback_enrichment_is_not_cached():
+    clock = FakeClock()
+    enricher = FallbackEnricher()
+    sink = DryRunSink(emit=lambda payload: None)
+    pipeline = build(sink=sink, clock=clock, enricher=enricher)
+    await pipeline.handle(make_event())
+    clock.advance(601)
+    await pipeline.handle(make_event())
+    assert len(sink.calls) == 2
+    assert len(enricher.seen) == 2
+
+
+async def test_the_enrichment_cache_is_bounded(monkeypatch):
+    import err2issue.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "ENRICHMENT_CACHE_SIZE", 2)
+    enricher = RecordingEnricher()
+    pipeline = build(enricher=enricher)
+    for i in range(3):
+        await pipeline.handle(make_event(exception_type=f"Error{i}"))
+    assert len(enricher.seen) == 3
+    assert len(pipeline._enrichments) == 2
+
+
+async def test_the_ai_summary_reaches_the_sink_as_the_description():
+    sink = CapturingSink()
+    pipeline = build(sink=sink, enricher=RecordingEnricher(summary="Cart sums null prices."))
+    await pipeline.handle(make_event())
+    assert sink.descriptions == ["Cart sums null prices."]
+
+
+# -- attribute-key redaction, enrichment context, suppression metrics -------
+
+
+async def test_sensitive_attribute_values_are_masked_before_enrichment_and_delivery():
+    password = "hun" + "ter2"
+    enricher = RecordingEnricher()
+    sink = CapturingSink()
+    pipeline = build(sink=sink, enricher=enricher)
+    event = make_event(
+        attributes={"db.password": password, "http.route": "/checkout"},
+        resource_attributes={"service.name": "checkout-api", "app.api_key": password},
+    )
+    result = await pipeline.handle(event)
+    assert result is not None
+    [seen] = enricher.seen
+    assert seen.attributes == {"db.password": "[REDACTED]", "http.route": "/checkout"}
+    assert seen.resource_attributes["app.api_key"] == "[REDACTED]"
+
+
+async def test_the_enricher_receives_the_redacted_correlated_lines():
+    secret = "ghp_" + "Q" * 36
+    enricher = RecordingEnricher()
+    pipeline = build(enricher=enricher)
+    event = make_event()
+    pipeline.absorb_context(
+        [make_log_line("loading cart 42"), make_log_line(f"token {secret}")], [event.trace_id] * 2
+    )
+    await pipeline.handle(event)
+    [lines] = enricher.correlated
+    assert [line.text for line in lines] == ["loading cart 42", "token [REDACTED]"]
+
+
+async def test_suppression_is_exported_per_reason_for_alerting():
+    pipeline = build()
+    text = pipeline.metrics.as_prometheus()
+    # Present at zero, so an alert has a series before the first exhaustion.
+    assert 'err2issue_suppressed_by_reason_total{reason="budget"} 0' in text
+    for _ in range(2):
+        await pipeline.handle(make_event())
+    text = pipeline.metrics.as_prometheus()
+    assert 'err2issue_suppressed_by_reason_total{reason="window"} 1' in text

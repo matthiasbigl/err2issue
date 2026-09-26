@@ -154,6 +154,37 @@ def test_extra_labels_are_parsed_from_settings():
     assert settings.extra_labels == ["err2issue", "production", "triage"]
 
 
+def test_not_planned_issues_are_not_reopened_by_default():
+    assert Settings().reopen_not_planned is False
+
+
+def test_assignees_are_parsed_and_passed_to_the_filer():
+    settings = Settings(
+        sink="github",
+        github_token="t",
+        github_repo="a/b",
+        issue_assignees=" @octocat, hubot ",
+        reopen_not_planned=True,
+    )
+    assert settings.assignees == ["octocat", "hubot"]
+    assert settings.validation_errors() == []
+    sink = build_sink(settings, client=GitHubClient(API, StaticTokenProvider("t")))
+    assert sink.filer.assignees == ["octocat", "hubot"]
+    assert sink.filer.reopen_not_planned is True
+
+
+@pytest.mark.parametrize("bad", ["-lead", "trail-", "dou--ble", "has space", "a" * 40, "x/y"])
+def test_invalid_assignee_logins_fail_fast(bad):
+    settings = Settings(github_token="t", github_repo="a/b", issue_assignees=bad)
+    assert any("E2I_ISSUE_ASSIGNEES" in p for p in settings.validation_errors())
+
+
+def test_more_than_ten_assignees_fail_fast():
+    logins = ",".join(f"user{i}" for i in range(11))
+    settings = Settings(github_token="t", github_repo="a/b", issue_assignees=logins)
+    assert any("allows 10" in p for p in settings.validation_errors())
+
+
 async def test_github_sink_reports_filer_availability_state():
     """/metrics and /stats read repository availability through the sink."""
     async with httpx.AsyncClient() as http:
@@ -163,3 +194,39 @@ async def test_github_sink_reports_filer_availability_state():
 
         filer._mark_unavailable(REPO, RepoUnavailable("issues disabled"))
         assert sink.health() == {"unavailable_repos": {REPO: 60.0}, "unavailable_events": 1}
+
+
+# -- description -----------------------------------------------------------
+
+
+@respx.mock
+async def test_workflow_sink_body_uses_the_description_for_the_summary():
+    route = respx.post(DISPATCH_URL).mock(return_value=httpx.Response(204))
+    async with httpx.AsyncClient() as http:
+        sink = WorkflowDispatchSink(build_client(http))
+        await sink.deliver(make_event(), "abc", REPO, "A title", description="Why it broke.")
+        await sink.deliver(make_event(), "abc", REPO, "A title")
+    with_description = json.loads(route.calls[0].request.content)["inputs"]
+    without = json.loads(route.calls[1].request.content)["inputs"]
+    assert with_description["title"] == "[x1] A title"
+    assert "### Summary\n\nWhy it broke." in with_description["context"]
+    assert "### Summary" not in without["context"]
+
+
+@respx.mock
+async def test_github_sink_passes_the_description_through():
+    respx.get(f"{API}/repos/{REPO}/issues").mock(return_value=httpx.Response(200, json=[]))
+    respx.post(f"{API}/repos/{REPO}/labels").mock(return_value=httpx.Response(201, json={}))
+    create = respx.post(f"{API}/repos/{REPO}/issues").mock(
+        return_value=httpx.Response(201, json=issue_payload(number=3))
+    )
+    async with httpx.AsyncClient() as http:
+        sink = GitHubSink(IssueFiler(build_client(http), sleep=no_sleep))
+        await sink.deliver(make_event(), "abc123def456", REPO, "t", description="Why.")
+    assert "### Summary\n\nWhy." in json.loads(create.calls[0].request.content)["body"]
+
+
+async def test_dry_run_accepts_a_description():
+    sink = DryRunSink()
+    result = await sink.deliver(make_event(), "abc", REPO, "A title", description="d")
+    assert result.action == "dry-run"

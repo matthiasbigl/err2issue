@@ -51,17 +51,30 @@ _BUILTIN: list[tuple[str, str]] = [
     # equal, leaking the password. `postgres:postgres` and `default:default` are
     # exactly the shapes that show up in a DSN inside a connection error.
     ("conn_string_password", r"(://[^\s:/@]+:)([^\s@/]+)@"),
+    # Credentials carried in a URL query string: presigned S3/GCS/Azure SAS
+    # URLs and OAuth redirects end up in "failed to fetch <url>" messages, and
+    # none of these values has a distinctive prefix. Keep the parameter name so
+    # the reader still sees *which* URL shape failed.
+    (
+        "url_query_secret",
+        r"(?i)([?&](?:access_token|refresh_token|id_token|token|sig|signature"
+        r"|x-amz-signature|x-amz-security-token|x-amz-credential|x-goog-signature"
+        r"|x-goog-credential|api[_-]?key|apikey|client_secret|password)=)[^&#\s\"'<>]+",
+    ),
     # PEM private keys — collapse the whole block
     (
         "private_key_block",
         r"-----BEGIN[A-Z ]*PRIVATE KEY-----.*?-----END[A-Z ]*PRIVATE KEY-----",
     ),
     # Generic assignments: api_key=..., secret: ..., password = "...", token=...
+    # Skips a value an earlier rule already masked: without the lookahead,
+    # `?api_key=[REDACTED]` (from url_query_secret) is re-masked wholesale and
+    # the parameter name the earlier rule deliberately kept is lost.
     (
         "generic_assignment",
         r"(?i)\b(?:api[_-]?key|secret[_-]?key|secret|password|passwd|pwd|access[_-]?token"
         r"|auth[_-]?token|client[_-]?secret|private[_-]?key)\b"
-        r"\s*[=:]\s*(?:\"[^\"]{4,}\"|'[^']{4,}'|[^\s,;)}\]]{4,})",
+        r"\s*[=:]\s*(?!\[REDACTED\])(?:\"[^\"]{4,}\"|'[^']{4,}'|[^\s,;)}\]]{4,})",
     ),
 ]
 
@@ -73,7 +86,24 @@ _FLAGS = re.DOTALL
 _TEMPLATES: dict[str, str] = {
     # Keep the URL shape (scheme, user, host); mask only the password.
     "conn_string_password": rf"\g<1>{MASK}@",
+    "url_query_secret": rf"\g<1>{MASK}",
 }
+
+# Attribute keys whose *value* is a credential regardless of its shape. A
+# `db.password` of `hunter2` or a `http.request.header.cookie` session id has no
+# prefix any value rule could recognise, so the key is the only signal. Matched
+# against the last dotted segment, whole-word, so `gen_ai.usage.input_tokens`
+# and `token_count` stay readable.
+_SENSITIVE_KEY = re.compile(
+    r"(?i)^(?:[a-z0-9]+[_-])*"
+    r"(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|authorization"
+    r"|cookie|set-cookie|credentials?|private[_-]?key|access[_-]?key|passphrase)$"
+)
+
+
+def is_sensitive_key(key: str) -> bool:
+    """True when an attribute named `key` carries a credential by definition."""
+    return bool(_SENSITIVE_KEY.match(key.rsplit(".", 1)[-1]))
 
 
 class Redactor:
@@ -106,6 +136,19 @@ class Redactor:
         for name, rule in self._rules:
             out = rule.sub(_TEMPLATES.get(name, MASK), out)
         return out
+
+    def attributes(self, attributes: dict[str, str]) -> dict[str, str]:
+        """Redact an attribute map: whole values under sensitive keys, patterns elsewhere.
+
+        Keys are never altered — they are schema, and masking them would hide
+        which attribute was withheld.
+        """
+        if not self.enabled:
+            return dict(attributes)
+        return {
+            key: (MASK if value and is_sensitive_key(key) else self(value))
+            for key, value in attributes.items()
+        }
 
     def scan(self, text: str) -> list[str]:
         """Return the names of rules that fire. Used by tests and diagnostics."""

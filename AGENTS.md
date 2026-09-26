@@ -214,7 +214,7 @@ Unresolved. Pick one up if you are looking for work.
   creating the label and creating the issue can still produce a duplicate. The
   window is one HTTP round-trip. Worth measuring before engineering further.
 - **A real gh-aw run is unverified.** The workflow now compiles clean on gh-aw
-  v0.83.4 and CI keeps it that way, but nobody has watched it actually fix a bug
+  v0.89.21 and CI keeps it that way, but nobody has watched it actually fix a bug
   and open a pull request. Compiling proves the configuration is valid, not that
   the prompt works. Someone with a repository receiving real err2issue issues
   should run it and report back.
