@@ -21,13 +21,14 @@ from tests.conftest import FakeClock, make_event, make_log_line
 
 
 class RecordingEnricher:
-    def __init__(self, title: str = "A title"):
+    def __init__(self, title: str = "A title", summary: str = ""):
         self.title = title
+        self.summary = summary
         self.seen = []
 
     async def enrich(self, event):
         self.seen.append(event)
-        return Enrichment(title=self.title, summary="", source="ai")
+        return Enrichment(title=self.title, summary=self.summary, source="ai")
 
 
 class ExplodingSink(DryRunSink):
@@ -207,10 +208,14 @@ class CapturingSink(DryRunSink):
     def __init__(self):
         super().__init__(emit=lambda payload: None)
         self.correlated = []
+        self.descriptions = []
 
-    async def deliver(self, event, fingerprint, repo, summary, correlated=None):
+    async def deliver(self, event, fingerprint, repo, summary, correlated=None, **kwargs):
         self.correlated.append(list(correlated or []))
-        return await super().deliver(event, fingerprint, repo, summary, correlated=correlated)
+        self.descriptions.append(kwargs.get("description", ""))
+        return await super().deliver(
+            event, fingerprint, repo, summary, correlated=correlated, **kwargs
+        )
 
 
 async def test_correlated_log_lines_are_redacted_before_delivery():
@@ -281,3 +286,10 @@ async def test_the_enrichment_cache_is_bounded(monkeypatch):
         await pipeline.handle(make_event(exception_type=f"Error{i}"))
     assert len(enricher.seen) == 3
     assert len(pipeline._enrichments) == 2
+
+
+async def test_the_ai_summary_reaches_the_sink_as_the_description():
+    sink = CapturingSink()
+    pipeline = build(sink=sink, enricher=RecordingEnricher(summary="Cart sums null prices."))
+    await pipeline.handle(make_event())
+    assert sink.descriptions == ["Cart sums null prices."]

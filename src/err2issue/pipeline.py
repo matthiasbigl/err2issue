@@ -203,6 +203,7 @@ class Pipeline:
                 repo=repo,
                 summary=enrichment.title,
                 correlated=correlated,
+                description=enrichment.summary,
             )
         except Exception:
             self.metrics.failed += 1

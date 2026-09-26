@@ -64,12 +64,22 @@ def _clip(body: str, limit: int = BODY_LIMIT) -> str:
     if len(body) <= limit:
         return body
     note = f"\n\n{TRUNCATION_NOTE}\n"
-    fence = "\n```"
-    kept = body[: max(0, limit - len(note) - len(fence))]
+    # A closing fence is a backtick run as long as the opener (>= 3; longer when
+    # the content held backticks). BODY_LIMIT sits ~500 below GitHub's hard cap,
+    # which absorbs it.
+    kept = body[: max(0, limit - len(note))]
     kept = kept.rsplit("\n", 1)[0] if "\n" in kept else kept
-    open_fences = sum(1 for line in kept.split("\n") if line.startswith("```"))
-    if open_fences % 2:
-        kept += fence
+    open_fence = None
+    for line in kept.split("\n"):
+        run = re.match(r"`{3,}", line)
+        if run is None:
+            continue
+        if open_fence is None:
+            open_fence = run.group(0)
+        elif line.rstrip() == run.group(0) and len(run.group(0)) >= len(open_fence):
+            open_fence = None
+    if open_fence is not None:
+        kept += "\n" + open_fence
     return kept + note
 
 

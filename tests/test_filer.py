@@ -591,3 +591,19 @@ async def test_occurrence_comments_are_clipped():
             make_event(stacktrace="frame\n" * 30_000), FINGERPRINT, REPO, "s"
         )
     assert len(body_of(comment)["body"]) <= 65_536
+
+
+def test_clip_closes_a_long_fence_with_a_matching_one():
+    from err2issue.github.filer import _clip
+
+    body = "header\n````\n" + "x\n" * 50_000
+    clipped = _clip(body, limit=1000)
+    assert len(clipped) <= 1000 + 10
+    assert clipped.split("x\n")[-1].startswith("````\n")
+
+
+def test_clip_treats_an_inner_short_fence_as_content():
+    from err2issue.github.filer import _clip
+
+    body = "header\n````\n```\ninner\n```\n" + "y\n" * 50_000
+    assert _clip(body, limit=1000).rstrip().split("\n")[-3] == "````"
