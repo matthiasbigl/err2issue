@@ -88,8 +88,10 @@ class WorkflowDispatchSink(Sink):
         max_message_chars: int = 2000,
         max_stacktrace_chars: int = 6000,
         max_log_lines: int = 20,
+        trace_url_template: str = "",
     ):
         self.client = client
+        self.trace_url_template = trace_url_template
         self.workflow_file = workflow_file
         self.ref = ref
         self.max_message_chars = max_message_chars
@@ -109,6 +111,7 @@ class WorkflowDispatchSink(Sink):
             max_message_chars=self.max_message_chars,
             max_stacktrace_chars=self.max_stacktrace_chars,
             max_log_lines=self.max_log_lines,
+            trace_url_template=self.trace_url_template,
         )
         inputs = {
             "fingerprint": fingerprint,
@@ -172,6 +175,7 @@ def build_sink(settings, client: GitHubClient | None) -> Sink:
             max_message_chars=settings.max_message_chars,
             max_stacktrace_chars=settings.max_stacktrace_chars,
             max_log_lines=settings.max_context_log_lines,
+            trace_url_template=settings.trace_url_template,
         )
     return GitHubSink(
         IssueFiler(
@@ -183,5 +187,6 @@ def build_sink(settings, client: GitHubClient | None) -> Sink:
             max_stacktrace_chars=settings.max_stacktrace_chars,
             max_log_lines=settings.max_context_log_lines,
             unavailable_cooldown_seconds=settings.repo_unavailable_cooldown_seconds,
+            trace_url_template=settings.trace_url_template,
         )
     )

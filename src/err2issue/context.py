@@ -260,6 +260,19 @@ def _exception_line(event: ErrorEvent, limit: int) -> str:
     return f"{event.exception_type}: {truncate(event.exception_message, limit)}"
 
 
+# Trace ids are hex in both OTLP encodings. Anything else (a malformed JSON
+# export) is shown but never interpolated into a URL.
+_TRACE_ID_RE = re.compile(r"[0-9a-fA-F]{16,32}")
+
+
+def trace_ref(trace_id: str, url_template: str = "") -> str:
+    """The trace id as inline code, linked to the telemetry backend if configured."""
+    code = _code(trace_id)
+    if not url_template or not _TRACE_ID_RE.fullmatch(trace_id):
+        return code
+    return f"[{code}]({url_template.format(trace_id=trace_id)})"
+
+
 def _fmt_time(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -320,6 +333,7 @@ def build_body(
     max_stacktrace_chars: int = 6000,
     max_log_lines: int = 20,
     max_attribute_rows: int = 50,
+    trace_url_template: str = "",
 ) -> str:
     first = first_seen or event.timestamp
     parts: list[str] = [machine_header(fingerprint, version, count), ""]
@@ -338,7 +352,7 @@ def build_body(
         ("Fingerprint", f"`{version}:{fingerprint}`"),
     ]
     if event.trace_id:
-        rows.append(("Trace ID", f"`{event.trace_id}`"))
+        rows.append(("Trace ID", trace_ref(event.trace_id, trace_url_template)))
     if event.span_id:
         rows.append(("Span ID", f"`{event.span_id}`"))
 
@@ -414,6 +428,7 @@ def build_occurrence_comment(
     regression: bool = False,
     max_log_lines: int = 10,
     max_stacktrace_chars: int = 2000,
+    trace_url_template: str = "",
 ) -> str:
     parts: list[str] = []
     if regression:
@@ -433,7 +448,7 @@ def build_occurrence_comment(
     if host:
         parts.append(f"- **Host** {_code(truncate(host, 200))}")
     if event.trace_id:
-        parts.append(f"- **Trace** {_code(event.trace_id)}")
+        parts.append(f"- **Trace** {trace_ref(event.trace_id, trace_url_template)}")
     parts.append("")
 
     logged = log_message(event)

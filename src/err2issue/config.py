@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     max_message_chars: int = 2000
     max_stacktrace_chars: int = 6000
     max_context_log_lines: int = 20
+    trace_url_template: str = ""
+    """Link trace ids to a telemetry backend, e.g.
+    `https://grafana.example.com/explore?traceId={trace_id}`. Empty: no link."""
 
     # ---- redaction ----
     redact: bool = True
@@ -198,6 +201,25 @@ class Settings(BaseSettings):
                 f"E2I_WORKFLOW_FILE should be a workflow filename ending in .yml, "
                 f"got {self.workflow_file!r}"
             )
+
+        if self.trace_url_template:
+            template = self.trace_url_template
+            try:
+                rendered = template.format(trace_id="0" * 32)
+            except (KeyError, IndexError, ValueError) as exc:
+                problems.append(
+                    f"E2I_TRACE_URL_TEMPLATE must use only the {{trace_id}} placeholder: {exc!r}"
+                )
+            else:
+                if "{trace_id}" not in template:
+                    problems.append("E2I_TRACE_URL_TEMPLATE must contain {trace_id}")
+                elif not rendered.startswith(("https://", "http://")):
+                    problems.append("E2I_TRACE_URL_TEMPLATE must be an http(s) URL")
+                elif any(ch in rendered for ch in " ()<>"):
+                    problems.append(
+                        "E2I_TRACE_URL_TEMPLATE must not contain spaces, parentheses or "
+                        "angle brackets (they break the Markdown link); percent-encode them"
+                    )
 
         for name, value in (
             ("E2I_SUPPRESS_WINDOW_SECONDS", self.suppress_window_seconds),

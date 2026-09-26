@@ -608,3 +608,12 @@ def test_clip_treats_an_inner_short_fence_as_content():
 
     body = "header\n````\n```\ninner\n```\n" + "y\n" * 50_000
     assert _clip(body, limit=1000).rstrip().split("\n")[-3] == "````"
+
+
+@respx.mock
+async def test_the_filer_links_traces_when_a_template_is_configured():
+    create = _mock_create_path()
+    async with httpx.AsyncClient() as http:
+        filer = build_filer(http, trace_url_template="https://t.example/{trace_id}")
+        await filer.file(make_event(), FINGERPRINT, REPO, "s")
+    assert "(https://t.example/4bf92f3577b34da6a3ce929d0e0e4736)" in body_of(create)["body"]

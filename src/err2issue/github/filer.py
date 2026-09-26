@@ -157,8 +157,10 @@ class IssueFiler:
         sleep=asyncio.sleep,
         unavailable_cooldown_seconds: float = UNAVAILABLE_COOLDOWN_SECONDS,
         clock=time.monotonic,
+        trace_url_template: str = "",
     ):
         self.client = client
+        self.trace_url_template = trace_url_template
         self.extra_labels = extra_labels or ["err2issue"]
         self.reopen_closed = reopen_closed
         self.max_message_chars = max_message_chars
@@ -324,6 +326,7 @@ class IssueFiler:
             max_message_chars=self.max_message_chars,
             max_stacktrace_chars=self.max_stacktrace_chars,
             max_log_lines=self.max_log_lines,
+            trace_url_template=self.trace_url_template,
         )
         labels = [*self.extra_labels, label]
         issue = await self.client.create_issue(repo, title=title, body=_clip(body), labels=labels)
@@ -376,6 +379,7 @@ class IssueFiler:
                 correlated=correlated,
                 regression=regression,
                 max_stacktrace_chars=self.max_stacktrace_chars,
+                trace_url_template=self.trace_url_template,
             )
             await self.client.add_comment(repo, number, _clip(comment))
 

@@ -125,6 +125,16 @@ values in tables are rendered as inline code with `|` escaped and newlines
 collapsed, so they cannot break out of their row. The runtime attributes table
 shows at most 50 rows, then a `+N more` row.
 
+When `E2I_TRACE_URL_TEMPLATE` is set (for example
+`https://grafana.example.com/explore?traceId={trace_id}`), the Trace ID row and
+the occurrence comment's trace bullet link to the telemetry backend. Only a
+hex trace id is ever interpolated into the URL.
+
+On each later occurrence err2issue rewrites the header's `count=`, the Last
+seen and Occurrences rows, and — when the service version differs from the one
+first filed — a `Latest version` row. Everything else in the body, including
+human edits, is left as it was.
+
 ## Lifecycle
 
 ```mermaid

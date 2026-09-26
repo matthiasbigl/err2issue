@@ -531,3 +531,31 @@ def test_occurrence_comment_carries_environment_and_host():
 def test_footer_says_later_occurrences_become_comments():
     body = ctx.build_body(make_event(), "abc", "v2", "")
     assert "each later occurrence is recorded as a comment" in body
+
+
+# -- trace backend links ----------------------------------------------------
+
+TEMPLATE = "https://grafana.example.com/explore?traceId={trace_id}"
+
+
+def test_trace_id_links_to_the_backend_when_configured():
+    body = ctx.build_body(make_event(), "abc", "v2", "", trace_url_template=TEMPLATE)
+    trace = "4bf92f3577b34da6a3ce929d0e0e4736"
+    assert (
+        f"| Trace ID | [`{trace}`](https://grafana.example.com/explore?traceId={trace}) |" in body
+    )
+
+
+def test_trace_id_is_plain_code_without_a_template():
+    body = ctx.build_body(make_event(), "abc", "v2", "")
+    assert "| Trace ID | `4bf92f3577b34da6a3ce929d0e0e4736` |" in body
+
+
+def test_a_non_hex_trace_id_is_never_put_in_a_url():
+    ref = ctx.trace_ref("x) [evil](https://e", TEMPLATE)
+    assert ref.startswith("`") and "grafana" not in ref
+
+
+def test_occurrence_comment_links_the_trace():
+    comment = ctx.build_occurrence_comment(make_event(), count=2, trace_url_template=TEMPLATE)
+    assert "(https://grafana.example.com/explore?traceId=4bf92f" in comment

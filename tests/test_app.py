@@ -420,3 +420,22 @@ def test_oversized_body_is_refused_without_content_length(client, small_ceiling)
     )
     assert response.status_code == 413
     assert response.json()["error"].startswith("body exceeds "), "must be the streaming guard"
+
+
+@pytest.mark.parametrize(
+    ("template", "problem"),
+    [
+        ("https://grafana/explore", "must contain {trace_id}"),
+        ("https://grafana/{trace}", "only the {trace_id} placeholder"),
+        ("grafana/{trace_id}", "http(s) URL"),
+        ("https://grafana/q=(trace:{trace_id})", "parentheses"),
+    ],
+)
+def test_a_bad_trace_url_template_is_a_validation_error(template, problem):
+    settings = Settings(sink="dry-run", trace_url_template=template)
+    assert any(problem in p for p in settings.validation_errors())
+
+
+def test_a_good_trace_url_template_validates():
+    settings = Settings(sink="dry-run", trace_url_template="https://g/x?traceId={trace_id}")
+    assert settings.validation_errors() == []
