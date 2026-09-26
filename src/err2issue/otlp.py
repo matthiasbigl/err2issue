@@ -11,6 +11,9 @@ https://opentelemetry.io/docs/specs/semconv/exceptions/exceptions-logs/
 
 from __future__ import annotations
 
+import base64
+import binascii
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -85,8 +88,8 @@ def decode_protobuf(body: bytes) -> list[tuple[dict[str, str], dict[str, Any]]]:
                             "time_unix_nano": int(record.time_unix_nano)
                             or int(record.observed_time_unix_nano),
                             "body": _pb_any_value(record.body) if record.HasField("body") else "",
-                            "trace_id": record.trace_id.hex() or None,
-                            "span_id": record.span_id.hex() or None,
+                            "trace_id": _id_from_bytes(record.trace_id, TRACE_ID_BYTES),
+                            "span_id": _id_from_bytes(record.span_id, SPAN_ID_BYTES),
                         },
                     )
                 )
@@ -95,7 +98,24 @@ def decode_protobuf(body: bytes) -> list[tuple[dict[str, str], dict[str, Any]]]:
 
 # --------------------------------------------------------------------------
 # JSON (protobuf JSON mapping — accepts camelCase and snake_case)
+#
+# JSON arrives from anything that can speak HTTP, not just collectors, so every
+# shape is checked rather than assumed: a list where an object belongs, a null
+# record, or a non-numeric timestamp skips or zeroes that one field instead of
+# raising into /v1/logs and 500ing the whole batch.
 # --------------------------------------------------------------------------
+
+
+def _list(value: Any) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _dicts(value: Any) -> list[dict]:
+    return [item for item in _list(value) if isinstance(item, dict)]
+
+
+def _json_values(container: Any) -> list:
+    return _list(container.get("values")) if isinstance(container, dict) else []
 
 
 def _json_any_value(value: Any) -> str:
@@ -117,11 +137,11 @@ def _json_any_value(value: Any) -> str:
             return str(value[key])
     for key in ("arrayValue", "array_value"):
         if key in value:
-            values = (value[key] or {}).get("values", []) or []
+            values = _json_values(value[key])
             return "[" + ", ".join(_json_any_value(v) for v in values) + "]"
     for key in ("kvlistValue", "kvlist_value"):
         if key in value:
-            values = (value[key] or {}).get("values", []) or []
+            values = _dicts(_json_values(value[key]))
             inner = ", ".join(
                 f"{kv.get('key')}={_json_any_value(kv.get('value'))}" for kv in values
             )
@@ -129,9 +149,9 @@ def _json_any_value(value: Any) -> str:
     return ""
 
 
-def _json_attributes(attributes: list[dict] | None) -> dict[str, str]:
+def _json_attributes(attributes: Any) -> dict[str, str]:
     out: dict[str, str] = {}
-    for entry in attributes or []:
+    for entry in _dicts(attributes):
         key = entry.get("key")
         if key:
             out[str(key)] = _json_any_value(entry.get("value"))
@@ -145,46 +165,129 @@ def _pick(mapping: dict, *names, default=None):
     return default
 
 
+def _json_int(value: Any) -> int:
+    """int64/uint64 fields are strings in the JSON mapping; tolerate junk as 0."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value == value and abs(value) != float("inf") else 0
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return 0
+    return 0
+
+
+def _json_severity(value: Any) -> int:
+    """OTLP/JSON says enums are integers, but stock protobuf JSON encoders emit
+    the enum *name* (`"SEVERITY_NUMBER_ERROR"`), and so does anything built on
+    `MessageToJson` defaults. Accept both."""
+    if isinstance(value, str) and value.strip().upper().startswith("SEVERITY_NUMBER_"):
+        return _SEVERITY_ENUM_NAMES.get(value.strip().upper(), 0)
+    return max(_json_int(value), 0)
+
+
+_SEVERITY_ENUM_NAMES = {
+    "SEVERITY_NUMBER_UNSPECIFIED": 0,
+    **{
+        f"SEVERITY_NUMBER_{name}{suffix}": base + offset
+        for name, base in (
+            ("TRACE", 1),
+            ("DEBUG", 5),
+            ("INFO", 9),
+            ("WARN", 13),
+            ("ERROR", 17),
+            ("FATAL", 21),
+        )
+        for offset, suffix in enumerate(("", "2", "3", "4"))
+    },
+}
+
+
 def decode_json(payload: dict) -> list[tuple[dict[str, str], dict[str, Any]]]:
     if not isinstance(payload, dict):
         raise DecodeError("OTLP JSON body must be an object")
 
-    resource_logs = _pick(payload, "resourceLogs", "resource_logs", default=[]) or []
+    resource_logs = _dicts(_pick(payload, "resourceLogs", "resource_logs", default=[]))
     records: list[tuple[dict[str, str], dict[str, Any]]] = []
     for resource_log in resource_logs:
-        resource = resource_log.get("resource") or {}
-        resource_attrs = _json_attributes(resource.get("attributes"))
-        scope_logs = _pick(resource_log, "scopeLogs", "scope_logs", default=[]) or []
+        resource = resource_log.get("resource")
+        resource_attrs = _json_attributes(
+            resource.get("attributes") if isinstance(resource, dict) else None
+        )
+        scope_logs = _dicts(_pick(resource_log, "scopeLogs", "scope_logs", default=[]))
         for scope_log in scope_logs:
-            log_records = _pick(scope_log, "logRecords", "log_records", default=[]) or []
+            log_records = _dicts(_pick(scope_log, "logRecords", "log_records", default=[]))
             for record in log_records:
-                time_nano = _pick(
-                    record,
-                    "timeUnixNano",
-                    "time_unix_nano",
-                    "observedTimeUnixNano",
-                    "observed_time_unix_nano",
-                    default=0,
+                time_nano = _json_int(
+                    _pick(record, "timeUnixNano", "time_unix_nano", default=0)
+                ) or _json_int(
+                    _pick(record, "observedTimeUnixNano", "observed_time_unix_nano", default=0)
                 )
+                severity_text = _pick(record, "severityText", "severity_text", default="")
                 records.append(
                     (
                         resource_attrs,
                         {
                             "attributes": _json_attributes(record.get("attributes")),
-                            "severity_number": int(
-                                _pick(record, "severityNumber", "severity_number", default=0) or 0
+                            "severity_number": _json_severity(
+                                _pick(record, "severityNumber", "severity_number", default=0)
                             ),
-                            "severity_text": _pick(
-                                record, "severityText", "severity_text", default=""
-                            ),
-                            "time_unix_nano": int(time_nano or 0),
+                            "severity_text": severity_text
+                            if isinstance(severity_text, str)
+                            else "",
+                            "time_unix_nano": time_nano,
                             "body": _json_any_value(record.get("body")),
-                            "trace_id": _pick(record, "traceId", "trace_id") or None,
-                            "span_id": _pick(record, "spanId", "span_id") or None,
+                            "trace_id": _id_from_json(
+                                _pick(record, "traceId", "trace_id"), TRACE_ID_BYTES
+                            ),
+                            "span_id": _id_from_json(
+                                _pick(record, "spanId", "span_id"), SPAN_ID_BYTES
+                            ),
                         },
                     )
                 )
     return records
+
+
+# --------------------------------------------------------------------------
+# trace / span ids
+#
+# Ids are the join key for the trace ring buffer and the text of the issue's
+# trace link, so they are normalized to one canonical form: lowercase hex of the
+# right length. OTLP/JSON specifies hex, but uppercase hex and the base64 that a
+# plain protobuf JSON encoder produces both occur in the wild. An all-zero id is
+# the spec's "invalid / not set" value and several SDKs send it for records
+# outside a span; kept verbatim it became one shared trace that stitched every
+# span-less log line into every span-less error's "correlated" context.
+# --------------------------------------------------------------------------
+
+TRACE_ID_BYTES = 16
+SPAN_ID_BYTES = 8
+_HEX_RE = re.compile(r"[0-9a-f]+")
+
+
+def _id_from_bytes(raw: bytes, size: int) -> str | None:
+    if len(raw) != size or not any(raw):
+        return None
+    return raw.hex()
+
+
+def _id_from_json(value: Any, size: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    lowered = text.lower()
+    if len(lowered) == size * 2 and _HEX_RE.fullmatch(lowered):
+        return lowered if lowered.strip("0") else None
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    return _id_from_bytes(raw, size)
 
 
 # --------------------------------------------------------------------------
@@ -204,9 +307,12 @@ def is_error(record: dict[str, Any], require_exception: bool = False) -> bool:
 
 
 def _timestamp(nanos: int) -> datetime:
-    if not nanos:
+    if not nanos or nanos < 0:
         return datetime.now(UTC)
-    return datetime.fromtimestamp(nanos / 1_000_000_000, tz=UTC)
+    try:
+        return datetime.fromtimestamp(nanos / 1_000_000_000, tz=UTC)
+    except (OverflowError, OSError, ValueError):  # past year 9999: a unit mix-up
+        return datetime.now(UTC)
 
 
 def _derive_type_and_message(record: dict[str, Any]) -> tuple[str, str]:
