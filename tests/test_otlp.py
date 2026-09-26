@@ -449,3 +449,40 @@ def test_blank_exception_message_alone_is_not_an_exception():
     _record(payload)["attributes"] = [{"key": "exception.message", "value": {"stringValue": " "}}]
     events, _ = otlp.to_events(otlp.decode_json(payload))
     assert events == []
+
+
+# -- instrumentation scope -> logger_name ----------------------------------
+
+
+def test_json_scope_name_becomes_logger_name():
+    payload = otlp_json()
+    payload["resourceLogs"][0]["scopeLogs"][0]["scope"] = {"name": "app.payments.stripe"}
+    events, _ = otlp.to_events(otlp.decode_json(payload))
+    assert events[0].logger_name == "app.payments.stripe"
+
+
+def test_protobuf_scope_name_becomes_logger_name():
+    request = ExportLogsServiceRequest()
+    request.ParseFromString(build_protobuf())
+    request.resource_logs[0].scope_logs[0].scope.name = "com.acme.CheckoutService"
+    events, _ = otlp.to_events(otlp.decode_protobuf(request.SerializeToString()))
+    assert events[0].logger_name == "com.acme.CheckoutService"
+
+
+@pytest.mark.parametrize("scope", [None, {}, {"name": ""}, {"name": 5}, ["x"]])
+def test_missing_or_odd_scope_leaves_logger_name_unset(scope):
+    payload = otlp_json()
+    if scope is not None:
+        payload["resourceLogs"][0]["scopeLogs"][0]["scope"] = scope
+    events, _ = otlp.to_events(otlp.decode_json(payload))
+    assert events[0].logger_name is None
+
+
+def test_logger_name_is_not_part_of_the_fingerprint():
+    from err2issue import fingerprint
+
+    plain = otlp.to_events(otlp.decode_json(otlp_json()))[0][0]
+    scoped_payload = otlp_json()
+    scoped_payload["resourceLogs"][0]["scopeLogs"][0]["scope"] = {"name": "anything"}
+    scoped = otlp.to_events(otlp.decode_json(scoped_payload))[0][0]
+    assert fingerprint.compute(plain) == fingerprint.compute(scoped)

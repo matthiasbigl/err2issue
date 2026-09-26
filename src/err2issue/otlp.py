@@ -77,6 +77,7 @@ def decode_protobuf(body: bytes) -> list[tuple[dict[str, str], dict[str, Any]]]:
     for resource_logs in request.resource_logs:
         resource_attrs = _pb_attributes(resource_logs.resource.attributes)
         for scope_logs in resource_logs.scope_logs:
+            scope_name = scope_logs.scope.name or None
             for record in scope_logs.log_records:
                 records.append(
                     (
@@ -90,6 +91,7 @@ def decode_protobuf(body: bytes) -> list[tuple[dict[str, str], dict[str, Any]]]:
                             "body": _pb_any_value(record.body) if record.HasField("body") else "",
                             "trace_id": _id_from_bytes(record.trace_id, TRACE_ID_BYTES),
                             "span_id": _id_from_bytes(record.span_id, SPAN_ID_BYTES),
+                            "scope_name": scope_name,
                         },
                     )
                 )
@@ -220,6 +222,9 @@ def decode_json(payload: dict) -> list[tuple[dict[str, str], dict[str, Any]]]:
         )
         scope_logs = _dicts(_pick(resource_log, "scopeLogs", "scope_logs", default=[]))
         for scope_log in scope_logs:
+            scope = scope_log.get("scope")
+            scope_name = scope.get("name") if isinstance(scope, dict) else None
+            scope_name = scope_name if isinstance(scope_name, str) and scope_name else None
             log_records = _dicts(_pick(scope_log, "logRecords", "log_records", default=[]))
             for record in log_records:
                 time_nano = _json_int(
@@ -247,6 +252,7 @@ def decode_json(payload: dict) -> list[tuple[dict[str, str], dict[str, Any]]]:
                             "span_id": _id_from_json(
                                 _pick(record, "spanId", "span_id"), SPAN_ID_BYTES
                             ),
+                            "scope_name": scope_name,
                         },
                     )
                 )
@@ -394,6 +400,7 @@ def to_events(
                     timestamp=timestamp,
                     severity_number=effective_severity(record) or SEVERITY_ERROR,
                     body=record.get("body") or None,
+                    logger_name=record.get("scope_name"),
                     attributes=dict(record["attributes"]),
                     resource_attributes=dict(resource_attrs),
                 )
