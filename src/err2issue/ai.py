@@ -138,9 +138,12 @@ class Enricher:
             # — but combining `effort` with `format` in one `output_config` is
             # not documented, and an unrecognised shape would 400 on every call,
             # silently pinning enrichment to the fallback title forever. This
-            # runs once per NEW issue (suppression and dedup absorb the rest),
-            # so the default effort costs little and the shape is the documented
-            # one: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+            # runs once per fingerprint per process in the common case: the
+            # suppression window absorbs bursts, and Pipeline caches successful
+            # results in a bounded LRU (fallbacks and evicted entries are
+            # re-enriched on the next occurrence), so the default effort costs
+            # little and the shape is the documented one:
+            # https://platform.claude.com/docs/en/build-with-claude/structured-outputs
             output_config={"format": {"type": "json_schema", "schema": _SCHEMA}},
             messages=[{"role": "user", "content": self._prompt(event)}],
         )

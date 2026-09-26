@@ -96,6 +96,13 @@ Referenced from [AGENTS.md](../AGENTS.md), which is the file to read first.
   `m.group(0).replace(m.group(1), MASK, 1)` — that masks the first occurrence of
   the *string*, which in `postgres:postgres@host` is the username, leaking the
   password. Equal user and password is the common case, not the edge one.
+- **Correlated log lines need redaction too.** `ErrorEvent.with_redactions()`
+  covers the event only; the trace ring buffer stores INFO/DEBUG lines raw,
+  because they arrive before anything knows an error will cite them. An INFO
+  `connecting with password=…` then rode into a public issue through the
+  correlated-lines section. `Pipeline.handle()` redacts each line with the
+  event's own redactor when it fetches them — any new text that reaches the
+  issue body needs the same treatment, wherever it comes from.
 
 ### Fingerprinting
 
@@ -123,6 +130,10 @@ Referenced from [AGENTS.md](../AGENTS.md), which is the file to read first.
   falls back to the deterministic title by design. `ai.py` sends only `format`.
 - A refusal is **HTTP 200 with `stop_reason: "refusal"`**, not an exception.
   Check `stop_reason` before reading `content`.
+- **A cached enrichment is only as good as its source.** `Pipeline` caches
+  enrichment per fingerprint so recurrences do not each cost a model call, but
+  only results with `source == "ai"`. Caching a fallback would pin that error to
+  the deterministic title for the life of the process after one timeout.
 
 ### Documentation and diagrams
 

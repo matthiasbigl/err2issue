@@ -198,3 +198,86 @@ async def test_suppression_reasons_are_aggregated():
     for _ in range(3):
         await pipeline.handle(make_event())
     assert sum(pipeline.metrics.suppression_reasons.values()) == 2
+
+
+# -- correlated-line redaction ---------------------------------------------
+
+
+class CapturingSink(DryRunSink):
+    def __init__(self):
+        super().__init__(emit=lambda payload: None)
+        self.correlated = []
+
+    async def deliver(self, event, fingerprint, repo, summary, correlated=None):
+        self.correlated.append(list(correlated or []))
+        return await super().deliver(event, fingerprint, repo, summary, correlated=correlated)
+
+
+async def test_correlated_log_lines_are_redacted_before_delivery():
+    """The trace buffer holds raw lines; they reach the same public issue as the event."""
+    # Built from fragments so push protection does not reject the file.
+    secret = "ghp_" + "Q" * 36
+    sink = CapturingSink()
+    pipeline = build(sink=sink)
+    event = make_event()
+    pipeline.absorb_context([make_log_line(f"connecting with token {secret}")], [event.trace_id])
+    await pipeline.handle(event)
+    [lines] = sink.correlated
+    assert len(lines) == 1
+    assert secret not in lines[0].text
+    assert "connecting with token [REDACTED]" in lines[0].text
+
+
+async def test_correlated_log_lines_pass_through_when_redaction_is_disabled():
+    secret = "ghp_" + "Q" * 36
+    sink = CapturingSink()
+    pipeline = build(sink=sink, redactor=Redactor(enabled=False))
+    event = make_event()
+    pipeline.absorb_context([make_log_line(f"token {secret}")], [event.trace_id])
+    await pipeline.handle(event)
+    assert secret in sink.correlated[0][0].text
+
+
+# -- enrichment cache ------------------------------------------------------
+
+
+class FallbackEnricher(RecordingEnricher):
+    async def enrich(self, event):
+        self.seen.append(event)
+        return Enrichment(title="fallback", summary="", source="fallback")
+
+
+async def test_a_recurrence_reuses_the_cached_enrichment():
+    clock = FakeClock()
+    enricher = RecordingEnricher()
+    sink = DryRunSink(emit=lambda payload: None)
+    pipeline = build(sink=sink, clock=clock, enricher=enricher)
+    await pipeline.handle(make_event())
+    clock.advance(601)  # past the 600s suppression window
+    await pipeline.handle(make_event())
+    assert len(sink.calls) == 2
+    assert len(enricher.seen) == 1
+
+
+async def test_a_fallback_enrichment_is_not_cached():
+    clock = FakeClock()
+    enricher = FallbackEnricher()
+    sink = DryRunSink(emit=lambda payload: None)
+    pipeline = build(sink=sink, clock=clock, enricher=enricher)
+    await pipeline.handle(make_event())
+    clock.advance(601)
+    await pipeline.handle(make_event())
+    assert len(sink.calls) == 2
+    assert len(enricher.seen) == 2
+
+
+async def test_the_enrichment_cache_is_bounded(monkeypatch):
+    import err2issue.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "ENRICHMENT_CACHE_SIZE", 2)
+    enricher = RecordingEnricher()
+    pipeline = build(enricher=enricher)
+    for i in range(3):
+        await pipeline.handle(make_event(exception_type=f"Error{i}"))
+    assert len(enricher.seen) == 3
+    assert len(pipeline._enrichments) == 2

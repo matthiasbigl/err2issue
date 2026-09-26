@@ -7,16 +7,22 @@ Ordering is deliberate. Redaction happens *before* fingerprinting so a secret
 never influences an error's identity, and before enrichment so it is never sent
 to a model. Suppression happens before routing and enrichment so a crash loop
 costs one cheap dict lookup rather than an LLM call.
+
+Correlated log lines are buffered raw (they arrive before we know whether an
+error will reference them), so they are redacted when fetched, with the same
+redactor the event uses.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
 from . import fingerprint as fp
-from .ai import Enricher
+from .ai import Enricher, Enrichment
 from .context import TraceBuffer
 from .models import ErrorEvent, FiledIssue, LogLine
 from .redact import Redactor
@@ -25,6 +31,11 @@ from .sinks import Sink
 from .suppress import Suppressor
 
 log = logging.getLogger(__name__)
+
+# Fingerprint -> AI enrichment, so recurrences outside the suppression window
+# (which dedup will turn into comments anyway) do not each cost a model call.
+# Bounded so a high-cardinality error stream cannot grow it without limit.
+ENRICHMENT_CACHE_SIZE = 2000
 
 
 @dataclass
@@ -121,6 +132,21 @@ class Pipeline:
         self.max_context_log_lines = max_context_log_lines
         self.drop_unrouted = drop_unrouted
         self.metrics = Metrics()
+        self._enrichments: OrderedDict[str, Enrichment] = OrderedDict()
+
+    async def _enrich(self, fingerprint: str, event: ErrorEvent) -> Enrichment:
+        cached = self._enrichments.get(fingerprint)
+        if cached is not None:
+            self._enrichments.move_to_end(fingerprint)
+            return cached
+        enrichment = await self.enricher.enrich(event)
+        # Only cache real model output; a fallback title should get another
+        # chance at enrichment the next time the error recurs.
+        if enrichment.source == "ai":
+            self._enrichments[fingerprint] = enrichment
+            if len(self._enrichments) > ENRICHMENT_CACHE_SIZE:
+                self._enrichments.popitem(last=False)
+        return enrichment
 
     def absorb_context(self, lines: list[LogLine], trace_ids: list[str | None]) -> None:
         for line, trace_id in zip(lines, trace_ids, strict=False):
@@ -158,10 +184,16 @@ class Pipeline:
             raise ValueError(message)
 
         # 5. Title and summary. Never fatal — falls back deterministically.
-        enrichment = await self.enricher.enrich(event)
+        #    Cached per fingerprint: a recurrence becomes a comment, not a new
+        #    title, so re-enriching it would be a wasted model call.
+        enrichment = await self._enrich(fingerprint, event)
 
-        # 6. Correlated context.
-        correlated = self.traces.get(event.trace_id, limit=self.max_context_log_lines)
+        # 6. Correlated context. The buffer holds raw lines, so redact them here
+        #    with the event's redactor — they end up in the same public issue.
+        correlated = [
+            dataclasses.replace(line, text=self.redactor(line.text))
+            for line in self.traces.get(event.trace_id, limit=self.max_context_log_lines)
+        ]
 
         # 7. Deliver.
         try:
