@@ -8,17 +8,21 @@ listed under **Behaviour changes**.
 
 ### Security
 
-- **The runtime image is now distroless** (`gcr.io/distroless/python3-debian13`), replacing
+- **The runtime image is now distroless** (`gcr.io/distroless/cc-debian13`), replacing
   `python:3.12-slim-bookworm`. The slim base carried 55 HIGH/CRITICAL CVEs with no fix
   available, including CRITICALs in zlib and SQLite, in packages the service never runs:
   util-linux, ncurses, perl, systemd libraries, and the dependencies vendored into the base
   image's pip. CI passes `--ignore-unfixed`, so it stayed green, but a deployment scanner
-  without that flag rejected the image. Distroless ships Python and the libraries it links,
-  with no shell, no package manager and no pip.
+  without that flag rejected the image. The new runtime holds glibc, libssl, CA
+  certificates, uv's standalone CPython and the venv. It has no shell, no package manager
+  and no pip.
+- **Python comes from uv's standalone build, not Debian's.** Debian's `python3.13`
+  (3.13.5) lags upstream by eleven patch releases and carries five unfixed HIGH CVEs. The
+  standalone build tracks upstream releases: 3.13.16 with OpenSSL 3.5.9 at release.
 
 ### Behaviour changes
 
-- Python in the image is **3.13** (Debian's build), up from 3.12. CI already tests 3.13.
+- Python in the image is **3.13**, up from 3.12. CI already tests 3.13.
 - **The image has no shell.** `docker exec … sh` no longer works; use
   `docker exec <c> python -c …` for debugging. The process still runs as uid/gid 10001, so
   `runAsUser: 10001` manifests are unaffected.
