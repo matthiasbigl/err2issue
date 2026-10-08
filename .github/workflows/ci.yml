@@ -106,8 +106,9 @@ jobs:
           curl -fsS http://localhost:4318/stats \
             | python3 -c 'import json,sys; assert json.load(sys.stdin)["metrics"]["error_events"] == 1, "error was not ingested"'
 
-          # The container must not be running as root.
-          test "$(docker exec e2i id -u)" != "0"
+          # The container must not be running as root. Asked of Python, not
+          # `id`: the distroless runtime has no coreutils.
+          test "$(docker exec e2i python -c 'import os; print(os.getuid())')" != "0"
 
           echo "image smoke test passed"
 

@@ -258,6 +258,22 @@ on v0.89.21.
 - **Network ecosystem identifiers are a closed set.** `npm`, `pip` and `cargo`
   are compile errors; the identifiers are `node`, `python`, `rust`, and so on.
 
+### Container image
+
+- **The runtime image has no shell.** It is distroless, so `RUN`, `HEALTHCHECK` and
+  `ENTRYPOINT` take exec form only, `docker exec … sh` fails, and `id`, `cat` and `ls` do
+  not exist. Use `python -c` inside the container. A `python:*-slim` runtime looked
+  equivalent until scanners caught up: dozens of unfixed HIGH CVEs in util-linux, perl and
+  ncurses, plus the vendored dependencies of the base image's pip, none of it used by the
+  service.
+- **The builder must use Debian's `python3`, not `python:*` from Docker Hub.** The venv's
+  `bin/python` is a symlink to the builder's interpreter. Distroless has
+  `/usr/bin/python3.13` and nothing under `/usr/local`, so a venv built on the official
+  Python image starts with "no such file or directory".
+- **`--ignore-unfixed` hides what consumers see.** CI's trivy gate passes it, so a base full
+  of unfixable CVEs stays green here and fails in any deployment scanning without it.
+  Check `trivy image --severity HIGH,CRITICAL` without the flag when you change the base.
+
 ### Everything else
 
 - **`ruff format` is enforced in CI.** Run it before pushing; it reflows a

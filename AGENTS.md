@@ -160,6 +160,7 @@ every one of them looks reasonable until it bites.
 | Fingerprinting | Why `\b\d{4,}\b` misses `3000ms`; why Python's error site is the *last* frame |
 | Anthropic API | A refusal is HTTP 200; `effort` and `format` do not go in the same `output_config` |
 | Docs and diagrams | The Mermaid traps `check_docs.py` enforces |
+| Container image | Distroless has no shell; the builder must use Debian's `python3`; `--ignore-unfixed` hides what consumers see |
 | Everything else | Secret-scanning fixtures, `TestClient` lifespan, `pull_request:` trigger types |
 
 ## What to do without asking, and what not to
