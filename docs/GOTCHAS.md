@@ -258,6 +258,30 @@ on v0.89.21.
 - **Network ecosystem identifiers are a closed set.** `npm`, `pip` and `cargo`
   are compile errors; the identifiers are `node`, `python`, `rust`, and so on.
 
+### Container image
+
+- **The runtime image has no shell.** It is distroless, so `RUN`, `HEALTHCHECK` and
+  `ENTRYPOINT` take exec form only, `docker exec … sh` fails, and `id`, `cat` and `ls` do
+  not exist. Use `python -c` inside the container. A `python:*-slim` runtime looked
+  equivalent until scanners caught up: dozens of unfixed HIGH CVEs in util-linux, perl and
+  ncurses, plus the vendored dependencies of the base image's pip, none of it used by the
+  service.
+- **The interpreter must sit at the same path in both stages.** The venv's `bin/python`
+  is a symlink to the builder's interpreter, so uv installs CPython into `/opt/python` and
+  the runtime copies that directory unchanged. Copy it anywhere else and the container fails
+  to start with "no such file or directory" before Python can print anything.
+- **Distribution Python is not the safe default.** `distroless/python3-debian13` still had
+  30 HIGH findings, 20 of them in Debian's own `python3.13`, which lagged upstream by eleven
+  patch releases. uv's standalone CPython is current, and it is the reason the base is
+  `distroless/cc`.
+- **Pip ships inside both Python images and gets flagged.** `python:*-slim` and uv's
+  standalone build both include pip, and pip's bundled SBOM reports its vendored urllib3,
+  msgpack and setuptools to Trivy. The builder deletes pip and ensurepip. Nothing at runtime
+  uses them; uv builds the venv.
+- **`--ignore-unfixed` hides what consumers see.** CI's trivy gate passes it, so a base full
+  of unfixable CVEs stays green here and fails in any deployment scanning without it.
+  Check `trivy image --severity HIGH,CRITICAL` without the flag when you change the base.
+
 ### Everything else
 
 - **`ruff format` is enforced in CI.** Run it before pushing; it reflows a
